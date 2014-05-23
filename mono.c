@@ -7,21 +7,23 @@
 #include <gmp.h>
 #include "blt.h"
 
-#define CLOSURE(x) ({void _()x _;})
+#define CLOSURE(_body_) ({void _()_body_ _;})
 
-#define POPZ ({ if (!stack_i) { report("stack underflow"); return; } stack[--stack_i]->z; })
+#define RUN_NEW(_var_, _body_) run_ptr _var_ = ({ \
+  run_ptr r = malloc(sizeof(*r)); \
+  void _(run_ptr _var_) _body_ r->fun = _; \
+  *tail = r; r->next = 0; r; })
 
-#define PEEKZ ({ if (!stack_i) { report("stack underflow"); return; } stack[stack_i - 1]->z; })
+#define RUN_NEW_FUN(_var_, _fun_) run_ptr _var_ = ({ \
+  run_ptr r = malloc(sizeof(*r)); \
+  r->fun = _fun_; \
+  *tail = r; r->next = 0; r; })
 
-enum {
-  T_MPZ = 0,
-};
+#define POPZ ({ if (!stack_i) { report("stack underflow"); return; } stack[--stack_i]; })
 
-struct val_s {
-  int type;
-  mpz_t z;
-};
-typedef struct val_s *val_ptr;
+#define PEEKZ ({ if (!stack_i) { report("stack underflow"); return; } stack[stack_i - 1]; })
+
+#define THROW(_msg_) { report(_msg_); return; }
 
 struct defn_s;
 typedef struct defn_s *defn_ptr;
@@ -59,22 +61,18 @@ int is_num(char *c) {
 int main() {
   char *errmsg = 0;
   void report(char *s) { errmsg = s; }
-  int stack_i = 0, stack_max = 8;
-  val_ptr *stack = malloc(sizeof(*stack) * stack_max);
-  void push(val_ptr v) {
+  int stack_i = 0, stack_max = 8, stack_record = 0;
+  mpz_t *stack = malloc(sizeof(*stack) * stack_max);
+  void grow() {
     if (stack_i == stack_max) {
-      stack_max *= 2;
-      stack = realloc(stack, sizeof(*stack) * stack_max);
+      stack = realloc(stack, sizeof(*stack) * (stack_max *= 2));
     }
-    stack[stack_i++] = v;
+    if (stack_i++ == stack_record) mpz_init(stack[stack_record++]);
   }
-  val_ptr clone(val_ptr v) {
-    val_ptr r = malloc(sizeof(*r));
-    mpz_init(r->z);
-    mpz_set(r->z, v->z);
-    return r;
+  void push(mpz_ptr v) {
+    grow();
+    mpz_set(stack[stack_i - 1], v);
   }
-
   BLT *dict = blt_new();
   int state = 0;
   char *word = 0, *c = 0;
@@ -101,39 +99,26 @@ int main() {
       if (it) {
         defn = it->data;
         if (state == 1) defn->compile_fun(); else defn->fun();
-        if (errmsg) {
-          puts(errmsg);
-          errmsg = 0;
-          return;
-        }
-        continue;
-      }
-      if (is_num(word)) {
+        if (errmsg) break;
+      } else if (is_num(word)) {
         if (state == 1) {
-          run_ptr w = malloc(sizeof(*w));
-          w->fun = ({ void _(run_ptr w) {
-            val_ptr r = malloc(sizeof(*r));
-            r->type = T_MPZ;
-            mpz_init(r->z);
-            mpz_set(r->z, w->z);
-            push(r);
-          }_;});
+          RUN_NEW(w, { push(w->z); });
           mpz_init(w->z);
           mpz_set_str(w->z, word, 0);
-          w->next = 0;
-          *tail = w;
           tail = &w->next;
         } else {
-          val_ptr r = malloc(sizeof(*r));
-          r->type = T_MPZ;
-          mpz_init(r->z);
-          mpz_set_str(r->z, word, 0);
-          push(r);
+          grow();
+          mpz_set_str(PEEKZ, word, 0);
         }
-        continue;
+      } else {
+        errmsg = "bad word";
+        break;
       }
-      printf("bad word '%s'\n", word);
-      break;
+    }
+    if (errmsg) {
+      puts(errmsg);
+      errmsg = 0;
+      return;
     }
     puts(state == 1 ? " compile" : " ok");
   }
@@ -144,11 +129,8 @@ int main() {
   }
 
   void default_compile() {
-    run_ptr w = malloc(sizeof(*w));
-    w->fun = run_defn;
+    RUN_NEW_FUN(w, run_defn);
     w->defn = defn;
-    w->next = 0;
-    *tail = w;
     tail = &w->next;
   }
 
@@ -163,57 +145,55 @@ int main() {
     add_dict_full(word, fun, default_compile);
   }
 
-  void compile_only() { report("cannot interpret"); }
+  void compile_only() { THROW("cannot interpret"); }
 
   void add_dict_compile(char *word, void (*compile_fun)()) {
     add_dict_full(word, compile_only, compile_fun);
   }
 
-  run_ptr *branch_stack = 0;  // TODO: Should be a stack.
+  struct list_s {
+    struct list_s *next;
+    void *data;
+  };
+  typedef struct list_s *list_ptr;
+  list_ptr branch_stack = 0;
+#define POP_BRANCH_STACK ({ if (!branch_stack) THROW("branch underflow"); \
+  run_ptr *r = branch_stack->data; branch_stack = branch_stack->next; r; })
 
   add_dict_compile(";", CLOSURE({
     state = 0;
     tail = 0;
     if (branch_stack) {
-      report("missing then");
-      branch_stack = 0;
+      branch_stack = 0;  // LEAK
+      THROW("missing then");
     }
   }));
 
-  add_dict_compile("then", CLOSURE({
-    if (!branch_stack) {
-      report("missing if");
-      return;
-    }
-    tail = &branch_stack[2]->next;
-    branch_stack = 0;
-  }));
+  add_dict_compile("then", CLOSURE({ tail = &POP_BRANCH_STACK[2]->next; }));
+  add_dict_compile("else", CLOSURE({ tail = &POP_BRANCH_STACK[0]; }));
 
-  add_dict_compile("else", CLOSURE({
-    if (!branch_stack) {
-      report("missing if");
-      return;
-    }
-    tail = &branch_stack[0];
-  }));
-  void run_if(run_ptr ifw) {
-    mpz_ptr z = POPZ;
-    run_ptr b = ifw->branch[!!mpz_sgn(z)];
-    for (run_ptr w = b; w; w = w->next) {
+  void run_list(run_ptr w) {
+    while(w) {
       w->fun(w);
-      if (errmsg) return;
+      if (errmsg) break;
+      w = w->next;
     }
   }
 
+  void run_if(run_ptr ifw) {
+    mpz_ptr z = POPZ;
+    run_list(ifw->branch[!!mpz_sgn(z)]);
+  }
+
   add_dict_compile("if", CLOSURE({
-    run_ptr w = malloc(sizeof(*w));
-    w->fun = run_if;
-    w->next = 0;
+    RUN_NEW_FUN(w, run_if);
     w->branch[0] = w->branch[1] = 0;
     w->branch[2] = w;
-    *tail = w;
     tail = &w->branch[1];
-    branch_stack = w->branch;
+    list_ptr p = malloc(sizeof(*p));
+    p->next = branch_stack;
+    p->data = w->branch;
+    branch_stack = p;
   }));
 
   add_dict(".", CLOSURE({ gmp_printf("%Zd ", POPZ); }));
@@ -224,19 +204,10 @@ int main() {
     mpz_set_ui(z, mpz_cmp(z, x) > 0);
   }));
 
-  add_dict("dup", CLOSURE({
-    if (!stack_i) {
-      report("stack underflow");
-      return;
-    }
-    push(clone(stack[stack_i - 1]));
-  }));
+  add_dict("dup", CLOSURE({ push(PEEKZ); }));
 
 #define DICT_MPZ(_op_, _mpz_fun_) add_dict(_op_, CLOSURE({ \
-      mpz_ptr z = POPZ; \
-      mpz_ptr x = PEEKZ; \
-      _mpz_fun_(x, x, z); \
-    }));
+      mpz_ptr z = POPZ; mpz_ptr x = PEEKZ; _mpz_fun_(x, x, z); }));
 
   DICT_MPZ("+", mpz_add);
   DICT_MPZ("-", mpz_sub);
@@ -244,20 +215,12 @@ int main() {
   DICT_MPZ("/", mpz_tdiv_q);
   DICT_MPZ("mod", mpz_tdiv_r);
 
-  void run_list() {
-    for (run_ptr w = defn->list; w; w = w->next) {
-      w->fun(w);
-      if (errmsg) break;
-    }
-  }
+  void run_defn_list() { run_list(defn->list); }
 
   add_dict(":", CLOSURE({
-    if (!get_word()) {
-      report("empty definition");
-      return;
-    }
+    if (!get_word()) THROW("empty definition");
     defn_ptr newdef = malloc(sizeof(*newdef));
-    newdef->fun = run_list;
+    newdef->fun = run_defn_list;
     newdef->compile_fun = default_compile;
     newdef->list = 0;
     tail = &newdef->list;
@@ -269,18 +232,16 @@ int main() {
     get_until_quote();
     fputs(word, stdout);
   }), CLOSURE({
-    run_ptr w = malloc(sizeof(*w));
-    w->fun = ({void _(run_ptr w) { fputs(w->s, stdout); }_;});
     get_until_quote();
+    RUN_NEW(w, { fputs(w->s, stdout); });
     w->s = strdup(word);
-    w->next = 0;
-    *tail = w;
     tail = &w->next;
   }));
 
   for(char *s; (s = readline("")); free(s)) if (*s) add_history(s), go(s);
 
-  free(stack);  // TODO: Call mpz_clear.
+  for(int i = 0; i < stack_record; i++) mpz_clear(stack[i]);
+  free(stack);
   blt_forall(dict, ({void _(BLT_IT *it) { defn_clear(it->data); }_;}));
   blt_clear(dict);
   return 0;
