@@ -1,4 +1,3 @@
-// = MonochromeForth =
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,12 +7,14 @@
 #include <gmp.h>
 #include "blt.h"
 
+#define CLOSURE(x) ({void _()x _;})
+
+#define POPZ ({ if (!stack_i) { report("stack underflow"); return; } stack[--stack_i]->z; })
+
+#define PEEKZ ({ if (!stack_i) { report("stack underflow"); return; } stack[stack_i - 1]->z; })
+
 enum {
   T_MPZ = 0,
-  T_STRING,
-  T_CORE,
-  T_LIST,
-  T_FUN,
 };
 
 struct val_s {
@@ -25,43 +26,39 @@ typedef struct val_s *val_ptr;
 struct defn_s;
 typedef struct defn_s *defn_ptr;
 
-struct word_list_s {
-  int type;
-  defn_ptr defn;
-  char *s;
-  mpz_t z;
-  struct word_list_s *next;
+struct run_s {
+  void (*fun)(struct run_s *);
+  struct run_s *next;
+  union {
+    defn_ptr defn;
+    char *s;
+    mpz_t z;
+    struct run_s *branch[3];
+  };
 };
-typedef struct word_list_s *word_list_ptr;
+typedef struct run_s *run_ptr;
 
 struct defn_s {
-  int type;
-  void (*fun)();
-  word_list_ptr list;
+  void (*fun)();  // Called during interpretation.
+  void (*compile_fun)();  // Called during compilation.
+  run_ptr list;  // For user-defined words.
 };
 
-int is_num(char *s) {
-  char *c = s;
+void defn_clear(defn_ptr defn) {
+  // TODO: Free defn->list.
+  free(defn);
+}
+
+int is_num(char *c) {
   if (!*c) return 0;
   if (*c == '-') c++;
   for (; *c; c++) if (!isdigit(*c)) return 0;
   return 1;
 }
 
-val_ptr new_z(char *s) {
-  if (!is_num(s)) {
-    puts("bug: expected number");
-    exit(1);
-  }
-  val_ptr r = malloc(sizeof(*r));
-  r->type = T_MPZ;
-  mpz_init(r->z);
-  mpz_set_str(r->z, s, 0);
-  return r;
-}
-
 int main() {
   char *errmsg = 0;
+  void report(char *s) { errmsg = s; }
   int stack_i = 0, stack_max = 8;
   val_ptr *stack = malloc(sizeof(*stack) * stack_max);
   void push(val_ptr v) {
@@ -78,189 +75,213 @@ int main() {
     return r;
   }
 
-  void report(char *s) { errmsg = s; }
-
   BLT *dict = blt_new();
-  void add_dict(char *word, void (*fun)()) {
-    defn_ptr defn = malloc(sizeof(*defn));
-    defn->type = T_CORE;
-    defn->fun = fun;
-    blt_put(dict, word, defn);
-  }
-
-  add_dict(".", ({void _() {
-    if (!stack_i) {
-      report("stack underflow");
-      return;
-    }
-    gmp_printf("%Zd ", stack[--stack_i]->z);
-  }_;}));
-
-  add_dict("0>", ({void _() {
-    if (!stack_i) {
-      report("stack underflow");
-      return;
-    }
-    mpz_set_si(stack[stack_i - 1]->z,
-        mpz_cmp_ui(stack[stack_i - 1], 0) > 0 ? 1 : 0);
-  }_;}));
-
-  add_dict("dup", ({void _() {
-    if (!stack_i) {
-      report("stack underflow");
-      return;
-    }
-    push(clone(stack[stack_i - 1]));
-  }_;}));
-
-  add_dict("+", ({void _() {
-    if (stack_i <= 1) {
-      report("stack underflow");
-      return;
-    }
-    stack_i--;
-    mpz_add(stack[stack_i - 1]->z, stack[stack_i - 1]->z, stack[stack_i]->z);
-  }_;}));
-
-  int state = 0, atEOL = 0;
+  int state = 0;
   char *word = 0, *c = 0;
-  void end_word() {
-    if (*c) *c = 0; else atEOL = 1;
-    c++;
-  }
   int get_word() {
-    if (atEOL) return 0;
+    if (!*c) return 0;
     while (*c == ' ') c++;  // Skip whitespace.
     word = c;
     while (*c && *c != ' ') c++;  // Read word.
-    end_word();
-    return 1;
+    if (*c) *c++ = 0;
+    return *word;
   }
   void get_until_quote() {
     word = c;
     while (*c && *c != '"') c++;
-    if (!*c) {
-      atEOL = 1;  // Missing quote, but who's counting?
-    } else {
-      *c++ = 0;
-      if (!*c) atEOL = 1;
-    }
+    if (*c) *c++ = 0;  // EOL also terminates strings.
   }
 
-  word_list_ptr *tail = 0;
+  run_ptr *tail = 0;
+  defn_ptr defn = 0;
   void go(char *line) {
-    state = 0;
     c = line;  // Initialize cursor.
-    atEOL = 0;
     while (get_word()) {
-      if (!strcmp(word, ";")) {
-        if (state == 1) {
-          state = 0;
-          tail = 0;
-          continue;
-        } else {
-          puts("unexpected ;");
-          return;
-        }
-      }
       BLT_IT *it = blt_get(dict, word);
-      if (!it) {
-        if (is_num(word)) {
-          if (state == 1) {
-            word_list_ptr w = malloc(sizeof(*w));
-            w->type = T_MPZ;
-            mpz_init(w->z);
-            mpz_set_str(w->z, word, 0);
-            w->next = 0;
-            *tail = w;
-            tail = &w->next;
-          } else {
-            push(new_z(word));
-          }
-          continue;
-        }
-        printf("bad word '%s'\n", word);
-        return;
-      }
-      defn_ptr defn = it->data;
-      if (state == 1) {
-        word_list_ptr w = malloc(sizeof(*w));
-        if (!strcmp(word, ".\"")) {
-          w->type = T_STRING;
-          get_until_quote();
-          w->s = strdup(word);
-        } else {
-          w->type = T_FUN;
-          w->defn = defn;
-        }
-        w->next = 0;
-        *tail = w;
-        tail = &w->next;
-      } else {
-        switch (defn->type) {
-        case T_CORE:
-          defn->fun();
-          break;
-        case T_LIST:
-          for (word_list_ptr w = defn->list; w; w = w->next) {
-            switch (w->type) {
-            case T_MPZ:
-              {
-                val_ptr r = malloc(sizeof(*r));
-                r->type = T_MPZ;
-                mpz_init(r->z);
-                mpz_set(r->z, w->z);
-                push(r);
-              }
-              break;
-            case T_FUN:
-              w->defn->fun();
-              break;
-            case T_STRING:
-              fputs(w->s, stdout);
-              break;
-            default:
-              puts("unhandled");
-              return;
-            }
-            if (errmsg) {
-              puts(errmsg);
-              errmsg = 0;
-              return;
-            }
-          }
-          break;
-        default:
-          puts("unhandled");
-          return;
-        }
+      if (it) {
+        defn = it->data;
+        if (state == 1) defn->compile_fun(); else defn->fun();
         if (errmsg) {
           puts(errmsg);
           errmsg = 0;
           return;
         }
+        continue;
       }
+      if (is_num(word)) {
+        if (state == 1) {
+          run_ptr w = malloc(sizeof(*w));
+          w->fun = ({ void _(run_ptr w) {
+            val_ptr r = malloc(sizeof(*r));
+            r->type = T_MPZ;
+            mpz_init(r->z);
+            mpz_set(r->z, w->z);
+            push(r);
+          }_;});
+          mpz_init(w->z);
+          mpz_set_str(w->z, word, 0);
+          w->next = 0;
+          *tail = w;
+          tail = &w->next;
+        } else {
+          val_ptr r = malloc(sizeof(*r));
+          r->type = T_MPZ;
+          mpz_init(r->z);
+          mpz_set_str(r->z, word, 0);
+          push(r);
+        }
+        continue;
+      }
+      printf("bad word '%s'\n", word);
+      break;
+    }
+    puts(state == 1 ? " compile" : " ok");
+  }
+
+  void run_defn(run_ptr w) {
+    defn_ptr old = defn;
+    defn = w->defn, defn->fun(), defn = old;
+  }
+
+  void default_compile() {
+    run_ptr w = malloc(sizeof(*w));
+    w->fun = run_defn;
+    w->defn = defn;
+    w->next = 0;
+    *tail = w;
+    tail = &w->next;
+  }
+
+  void add_dict_full(char *word, void (*fun)(), void (*compile_fun)()) {
+    defn_ptr defn = malloc(sizeof(*defn));
+    defn->fun = fun;
+    defn->compile_fun = compile_fun;
+    blt_put(dict, word, defn);
+  }
+
+  void add_dict(char *word, void (*fun)()) {
+    add_dict_full(word, fun, default_compile);
+  }
+
+  void compile_only() { report("cannot interpret"); }
+
+  void add_dict_compile(char *word, void (*compile_fun)()) {
+    add_dict_full(word, compile_only, compile_fun);
+  }
+
+  run_ptr *branch_stack = 0;  // TODO: Should be a stack.
+
+  add_dict_compile(";", CLOSURE({
+    state = 0;
+    tail = 0;
+    if (branch_stack) {
+      report("missing then");
+      branch_stack = 0;
+    }
+  }));
+
+  add_dict_compile("then", CLOSURE({
+    if (!branch_stack) {
+      report("missing if");
+      return;
+    }
+    tail = &branch_stack[2]->next;
+    branch_stack = 0;
+  }));
+
+  add_dict_compile("else", CLOSURE({
+    if (!branch_stack) {
+      report("missing if");
+      return;
+    }
+    tail = &branch_stack[0];
+  }));
+  void run_if(run_ptr ifw) {
+    mpz_ptr z = POPZ;
+    run_ptr b = ifw->branch[!!mpz_sgn(z)];
+    for (run_ptr w = b; w; w = w->next) {
+      w->fun(w);
+      if (errmsg) return;
     }
   }
 
-  add_dict(":", ({void _() {
+  add_dict_compile("if", CLOSURE({
+    run_ptr w = malloc(sizeof(*w));
+    w->fun = run_if;
+    w->next = 0;
+    w->branch[0] = w->branch[1] = 0;
+    w->branch[2] = w;
+    *tail = w;
+    tail = &w->branch[1];
+    branch_stack = w->branch;
+  }));
+
+  add_dict(".", CLOSURE({ gmp_printf("%Zd ", POPZ); }));
+
+  add_dict(">", CLOSURE({
+    mpz_ptr x = POPZ;
+    mpz_ptr z = PEEKZ;
+    mpz_set_ui(z, mpz_cmp(z, x) > 0);
+  }));
+
+  add_dict("dup", CLOSURE({
+    if (!stack_i) {
+      report("stack underflow");
+      return;
+    }
+    push(clone(stack[stack_i - 1]));
+  }));
+
+#define DICT_MPZ(_op_, _mpz_fun_) add_dict(_op_, CLOSURE({ \
+      mpz_ptr z = POPZ; \
+      mpz_ptr x = PEEKZ; \
+      _mpz_fun_(x, x, z); \
+    }));
+
+  DICT_MPZ("+", mpz_add);
+  DICT_MPZ("-", mpz_sub);
+  DICT_MPZ("*", mpz_mul);
+  DICT_MPZ("/", mpz_tdiv_q);
+  DICT_MPZ("mod", mpz_tdiv_r);
+
+  void run_list() {
+    for (run_ptr w = defn->list; w; w = w->next) {
+      w->fun(w);
+      if (errmsg) break;
+    }
+  }
+
+  add_dict(":", CLOSURE({
     if (!get_word()) {
       report("empty definition");
       return;
     }
-    defn_ptr defn = malloc(sizeof(*defn));
-    defn->type = T_LIST;
-    defn->list = 0;
-    tail = &defn->list;
-    blt_put(dict, word, defn);
+    defn_ptr newdef = malloc(sizeof(*newdef));
+    newdef->fun = run_list;
+    newdef->compile_fun = default_compile;
+    newdef->list = 0;
+    tail = &newdef->list;
+    blt_put(dict, word, newdef);
     state = 1;
-  }_;}));
+  }));
 
-  add_dict(".\"", ({void _() {
+  add_dict_full(".\"", CLOSURE({
     get_until_quote();
     fputs(word, stdout);
-  }_;}));
+  }), CLOSURE({
+    run_ptr w = malloc(sizeof(*w));
+    w->fun = ({void _(run_ptr w) { fputs(w->s, stdout); }_;});
+    get_until_quote();
+    w->s = strdup(word);
+    w->next = 0;
+    *tail = w;
+    tail = &w->next;
+  }));
 
   for(char *s; (s = readline("")); free(s)) if (*s) add_history(s), go(s);
+
+  free(stack);  // TODO: Call mpz_clear.
+  blt_forall(dict, ({void _(BLT_IT *it) { defn_clear(it->data); }_;}));
+  blt_clear(dict);
   return 0;
 }
