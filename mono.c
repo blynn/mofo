@@ -21,7 +21,7 @@
 
 #define POPZ ({ if (!stack_i) { report("stack underflow"); return; } stack[--stack_i]; })
 
-#define PEEKZ ({ if (!stack_i) { report("stack underflow"); return; } stack[stack_i - 1]; })
+#define PEEPZ ({ if (!stack_i) { report("stack underflow"); return; } stack[stack_i - 1]; })
 
 #define THROW(_msg_) { report(_msg_); return; }
 
@@ -35,7 +35,7 @@ struct run_s {
     defn_ptr defn;
     char *s;
     mpz_t z;
-    struct run_s *branch[3];
+    struct run_s *branch[2];
   };
 };
 typedef struct run_s *run_ptr;
@@ -90,6 +90,8 @@ int main() {
     if (*c) *c++ = 0;  // EOL also terminates strings.
   }
 
+  void run_int(run_ptr w) { push(w->z); }
+
   run_ptr *tail = 0;
   defn_ptr defn = 0;
   void go(char *line) {
@@ -102,13 +104,13 @@ int main() {
         if (errmsg) break;
       } else if (is_num(word)) {
         if (state == 1) {
-          RUN_NEW(w, { push(w->z); });
+          RUN_NEW_FUN(w, run_int);
           mpz_init(w->z);
           mpz_set_str(w->z, word, 0);
           tail = &w->next;
         } else {
           grow();
-          mpz_set_str(PEEKZ, word, 0);
+          mpz_set_str(PEEPZ, word, 0);
         }
       } else {
         errmsg = "bad word";
@@ -139,6 +141,17 @@ int main() {
     defn->fun = fun;
     defn->compile_fun = compile_fun;
     blt_put(dict, word, defn);
+
+    // TODO: Reduce waste.
+    char *upper = strdup(word);
+    for (char *c = upper; *c; c++) *c = toupper(*c);
+    if (strcmp(upper, word)) {
+      defn_ptr defn2 = malloc(sizeof(*defn));
+      defn2->fun = fun;
+      defn2->compile_fun = compile_fun;
+      blt_put(dict, upper, defn2);
+    }
+    free(upper);
   }
 
   void add_dict(char *word, void (*fun)()) {
@@ -157,20 +170,19 @@ int main() {
   };
   typedef struct list_s *list_ptr;
   list_ptr branch_stack = 0;
-#define POP_BRANCH_STACK ({ if (!branch_stack) THROW("branch underflow"); \
-  run_ptr *r = branch_stack->data; branch_stack = branch_stack->next; r; })
+  list_ptr ij_stack = 0;
+#define POP_BRANCH_STACK ({ \
+  if (!branch_stack) THROW("control stack underflow"); \
+  run_ptr r = branch_stack->data; branch_stack = branch_stack->next; r; })
 
   add_dict_compile(";", CLOSURE({
     state = 0;
     tail = 0;
     if (branch_stack) {
       branch_stack = 0;  // LEAK
-      THROW("missing then");
+      THROW("control stack garbage");
     }
   }));
-
-  add_dict_compile("then", CLOSURE({ tail = &POP_BRANCH_STACK[2]->next; }));
-  add_dict_compile("else", CLOSURE({ tail = &POP_BRANCH_STACK[0]; }));
 
   void run_list(run_ptr w) {
     while(w) {
@@ -180,40 +192,175 @@ int main() {
     }
   }
 
-  void run_if(run_ptr ifw) {
+  void run_if(run_ptr w) {
     mpz_ptr z = POPZ;
-    run_list(ifw->branch[!!mpz_sgn(z)]);
+    run_list(w->branch[!!mpz_sgn(z)]);
   }
 
   add_dict_compile("if", CLOSURE({
     RUN_NEW_FUN(w, run_if);
     w->branch[0] = w->branch[1] = 0;
-    w->branch[2] = w;
     tail = &w->branch[1];
     list_ptr p = malloc(sizeof(*p));
     p->next = branch_stack;
-    p->data = w->branch;
+    p->data = w;
     branch_stack = p;
+  }));
+  add_dict_compile("then", CLOSURE({
+    run_ptr w = POP_BRANCH_STACK;
+    if (w->fun != run_if) {
+      errmsg = "control stack error";
+      return;
+    }
+    tail = &w->next;
+  }));
+  add_dict_compile("else", CLOSURE({
+    run_ptr w = POP_BRANCH_STACK;
+    if (w->fun != run_if) {
+      errmsg = "control stack error";
+      return;
+    }
+    tail = &w->branch[0];
+  }));
+
+  void run_do(run_ptr w) {
+    mpz_ptr x = POPZ;
+    mpz_ptr y = POPZ;
+    mpz_t ind, lim;
+    mpz_init_set(ind, x);
+    mpz_init_set(lim, y);
+
+    list_ptr p = malloc(sizeof(*p));
+    p->next = ij_stack;
+    p->data = ind;
+    ij_stack = p;
+    if (w->branch[1]) {  // +LOOP.
+      mpz_mul_ui(lim, lim, 2);
+      mpz_sub_ui(lim, lim, 1);
+      int cont = 0;
+      mpz_t tmp;
+      mpz_init(tmp);
+      do {
+        run_list(w->branch[0]);
+        mpz_ptr inc = POPZ;
+        mpz_mul_ui(tmp, ind, 2);
+        cont = mpz_cmp(tmp, lim);
+        mpz_add(ind, ind, inc);
+        mpz_mul_ui(tmp, ind, 2);
+        cont += mpz_cmp(tmp, lim);
+      } while (!errmsg && cont);
+    } else {  // LOOP.
+      do {
+        run_list(w->branch[0]);
+        mpz_add_ui(ind, ind, 1);
+      } while (!errmsg && mpz_cmp(ind, lim));
+    }
+  }
+
+  add_dict_compile("do", CLOSURE({
+    RUN_NEW_FUN(w, run_do);
+    w->branch[0] = w->branch[1] = 0;
+    tail = &w->branch[0];
+
+    list_ptr p = malloc(sizeof(*p));
+    p->next = branch_stack;
+    p->data = w;
+    branch_stack = p;
+  }));
+  add_dict_compile("loop", CLOSURE({
+    run_ptr w = POP_BRANCH_STACK;
+    if (w->fun != run_do) {
+      errmsg = "control stack error";
+      return;
+    }
+    tail = &w->next;
+  }));
+  add_dict_compile("+loop", CLOSURE({
+    run_ptr w = POP_BRANCH_STACK;
+    if (w->fun != run_do) {
+      errmsg = "control stack error";
+      return;
+    }
+    w->branch[1] = (void *) 1;
+    tail = &w->next;
+  }));
+
+  void run_i(run_ptr unused) {
+    if (!ij_stack) THROW("control stack underflow");
+    push(ij_stack->data);
+  }
+
+  void run_j(run_ptr unused) {
+    if (!ij_stack || !ij_stack->next) THROW("control stack underflow");
+    push(ij_stack->next->data);
+  }
+
+  add_dict_compile("i", CLOSURE({
+    RUN_NEW_FUN(w, run_i);
+    tail = &w->next;
+  }));
+
+  add_dict_compile("j", CLOSURE({
+    RUN_NEW_FUN(w, run_j);
+    tail = &w->next;
   }));
 
   add_dict(".", CLOSURE({ gmp_printf("%Zd ", POPZ); }));
 
-  add_dict(">", CLOSURE({
-    mpz_ptr x = POPZ;
-    mpz_ptr z = PEEKZ;
-    mpz_set_ui(z, mpz_cmp(z, x) > 0);
+  add_dict("cr", CLOSURE({ putchar('\n'); }));
+
+  mpz_t z_emit;
+  mpz_init(z_emit);
+  add_dict("emit", CLOSURE({
+    mpz_set_ui(z_emit, 255);
+    mpz_and(z_emit, z_emit, POPZ);
+    putchar((char) mpz_get_d(z_emit));
   }));
 
-  add_dict("dup", CLOSURE({ push(PEEKZ); }));
+  add_dict("drop", CLOSURE({ POPZ; }));
+
+  add_dict("dup", CLOSURE({ push(PEEPZ); }));
+
+  add_dict("swap", CLOSURE({
+    mpz_ptr x = POPZ;
+    mpz_ptr y = PEEPZ;
+    mpz_swap(x, y);
+    grow();
+  }));
+
+  add_dict("rot", CLOSURE({
+    mpz_ptr x = POPZ;
+    mpz_ptr y = POPZ;
+    mpz_ptr z = PEEPZ;
+    mpz_swap(x, z);
+    mpz_swap(y, z);
+    grow();
+    grow();
+  }));
 
 #define DICT_MPZ(_op_, _mpz_fun_) add_dict(_op_, CLOSURE({ \
-      mpz_ptr z = POPZ; mpz_ptr x = PEEKZ; _mpz_fun_(x, x, z); }));
+      mpz_ptr z = POPZ; mpz_ptr x = PEEPZ; _mpz_fun_(x, x, z); }));
 
   DICT_MPZ("+", mpz_add);
   DICT_MPZ("-", mpz_sub);
   DICT_MPZ("*", mpz_mul);
   DICT_MPZ("/", mpz_tdiv_q);
   DICT_MPZ("mod", mpz_tdiv_r);
+  DICT_MPZ("and", mpz_and);
+  DICT_MPZ("or", mpz_ior);
+  DICT_MPZ("xor", mpz_xor);
+
+  add_dict(">", CLOSURE({
+    mpz_ptr x = POPZ;
+    mpz_ptr z = PEEPZ;
+    mpz_set_ui(z, mpz_cmp(z, x) > 0);
+  }));
+
+  add_dict("=", CLOSURE({
+    mpz_ptr x = POPZ;
+    mpz_ptr z = PEEPZ;
+    mpz_set_ui(z, !mpz_cmp(z, x));
+  }));
 
   void run_defn_list() { run_list(defn->list); }
 
@@ -244,5 +391,6 @@ int main() {
   free(stack);
   blt_forall(dict, ({void _(BLT_IT *it) { defn_clear(it->data); }_;}));
   blt_clear(dict);
+  mpz_clear(z_emit);
   return 0;
 }
