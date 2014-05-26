@@ -120,6 +120,7 @@ int main() {
     if (errmsg) {
       puts(errmsg);
       errmsg = 0;
+      // TODO: Clear all stacks.
       return;
     }
     puts(state == 1 ? " compile" : " ok");
@@ -173,7 +174,8 @@ int main() {
   list_ptr ij_stack = 0;
 #define POP_BRANCH_STACK ({ \
   if (!branch_stack) THROW("control stack underflow"); \
-  run_ptr r = branch_stack->data; branch_stack = branch_stack->next; r; })
+  list_ptr free_me = branch_stack; run_ptr r = branch_stack->data; \
+  branch_stack = branch_stack->next; free(free_me); r; })
 
   add_dict_compile(";", CLOSURE({
     state = 0;
@@ -223,6 +225,7 @@ int main() {
     tail = &w->branch[0];
   }));
 
+  char *leave_err = "leave";
   void run_do(run_ptr w) {
     mpz_ptr x = POPZ;
     mpz_ptr y = POPZ;
@@ -255,6 +258,12 @@ int main() {
         mpz_add_ui(ind, ind, 1);
       } while (!errmsg && mpz_cmp(ind, lim));
     }
+    if (errmsg == leave_err) errmsg = 0;
+    mpz_clear(ind);
+    mpz_clear(lim);
+    p = ij_stack;
+    ij_stack = ij_stack->next;
+    free(p);
   }
 
   add_dict_compile("do", CLOSURE({
@@ -282,6 +291,18 @@ int main() {
       return;
     }
     w->branch[1] = (void *) 1;
+    tail = &w->next;
+  }));
+  void run_leave(run_ptr unused) { THROW(leave_err); }
+
+  add_dict_compile("leave", CLOSURE({
+    if (!branch_stack) THROW("control stack underflow");
+    run_ptr r = branch_stack->data;
+    if (r->fun != run_do) {
+      errmsg = "control stack error";
+      return;
+    }
+    RUN_NEW_FUN(w, run_leave);
     tail = &w->next;
   }));
 
@@ -326,6 +347,13 @@ int main() {
     mpz_ptr y = PEEPZ;
     mpz_swap(x, y);
     grow();
+  }));
+
+  add_dict("over", CLOSURE({
+    POPZ;
+    mpz_ptr x = PEEPZ;
+    grow();
+    push(x);
   }));
 
   add_dict("rot", CLOSURE({
