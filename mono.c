@@ -1,4 +1,5 @@
 #include <ctype.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +37,10 @@ struct run_s {
     char *s;
     mpz_t z;
     struct run_s *branch[2];
+    struct {
+      int n;
+      mpz_t *array;
+    };
   };
 };
 typedef struct run_s *run_ptr;
@@ -56,6 +61,28 @@ int is_num(char *c) {
   if (*c == '-') c++;
   for (; *c; c++) if (!isdigit(*c)) return 0;
   return 1;
+}
+
+void toutf8(void (*f)(char), uint32_t x) {
+  if (x < 0x80) {
+    f(x);
+    return;
+  }
+  if (x < 0x800) {
+    f((x>>6) | 0xC0), f((x & 0x3F) | 0x80);
+    return;
+  }
+  if (x < 0x10000) {
+    f((x>>12) | 0xE0), f(((x>>6) & 0x3F) | 0x80), f((x & 0x3F) | 0x80);
+    return;
+  }
+  if (x < 0x110000) {
+    f((x>>18) | 0xF0);
+    f(((x>>12) & 0x3F) | 0x80);
+    f(((x>>6) & 0x3F) | 0x80);
+    f((x & 0x3F) | 0x80);
+    return;
+  }
 }
 
 int main() {
@@ -94,6 +121,7 @@ int main() {
 
   run_ptr *tail = 0;
   defn_ptr defn = 0;
+  int quiet = 0;
   void go(char *line) {
     c = line;  // Initialize cursor.
     while (get_word()) {
@@ -117,13 +145,15 @@ int main() {
         break;
       }
     }
-    if (errmsg) {
-      puts(errmsg);
+    if (errmsg) {  // QUIT returns the empty error message "".
+      if (errmsg[0]) {
+        puts(errmsg);
+        // TODO: Clear all stacks.
+      }
       errmsg = 0;
-      // TODO: Clear all stacks.
       return;
     }
-    puts(state == 1 ? " compile" : " ok");
+    if (!quiet) puts(state == 1 ? " compile" : " ok");
   }
 
   void run_defn(run_ptr w) {
@@ -217,7 +247,8 @@ int main() {
     tail = &w->next;
   }));
   add_dict_compile("else", CLOSURE({
-    run_ptr w = POP_BRANCH_STACK;
+    if (!branch_stack) THROW("control stack underflow");
+    run_ptr w = branch_stack->data;
     if (w->fun != run_if) {
       errmsg = "control stack error";
       return;
@@ -330,12 +361,16 @@ int main() {
 
   add_dict("cr", CLOSURE({ putchar('\n'); }));
 
-  mpz_t z_emit;
-  mpz_init(z_emit);
+  mpz_t z_tmp;
+  mpz_init(z_tmp);
+
   add_dict("emit", CLOSURE({
-    mpz_set_ui(z_emit, 255);
-    mpz_and(z_emit, z_emit, POPZ);
-    putchar((char) mpz_get_d(z_emit));
+    mpz_set_ui(z_tmp, 0);
+    mpz_setbit(z_tmp, 32);
+    mpz_sub_ui(z_tmp, z_tmp, 1);
+    mpz_and(z_tmp, z_tmp, POPZ);
+    toutf8((void (*)(char)) putchar, mpz_get_ui(z_tmp));
+    //putchar((char) mpz_get_d(z_tmp));
   }));
 
   add_dict("drop", CLOSURE({ POPZ; }));
@@ -378,6 +413,12 @@ int main() {
   DICT_MPZ("or", mpz_ior);
   DICT_MPZ("xor", mpz_xor);
 
+  add_dict("<", CLOSURE({
+    mpz_ptr x = POPZ;
+    mpz_ptr z = PEEPZ;
+    mpz_set_ui(z, mpz_cmp(z, x) < 0);
+  }));
+
   add_dict(">", CLOSURE({
     mpz_ptr x = POPZ;
     mpz_ptr z = PEEPZ;
@@ -391,6 +432,71 @@ int main() {
   }));
 
   void run_defn_list() { run_list(defn->list); }
+
+  run_ptr dp = 0;
+
+  void run_addr(run_ptr w) {
+    mpz_set_ui(z_tmp, (long) w->array / sizeof(mpz_t));
+    push(z_tmp);
+    //run_list(w->next);
+  }
+
+  void run_create(run_ptr w) {
+    if (!get_word()) THROW("empty definition");
+    defn_ptr newdef = malloc(sizeof(*newdef));
+    newdef->fun = run_defn_list;
+    newdef->compile_fun = default_compile;
+    dp = malloc(sizeof(*dp));
+    dp->next = w->branch[0];
+    dp->fun = run_addr;
+    dp->n = 0;
+    dp->array = 0;
+    newdef->list = dp;
+    blt_put(dict, word, newdef);
+  }
+
+  run_ptr last_create = 0;
+  add_dict_full("create", CLOSURE({
+    if (!get_word()) THROW("empty definition");
+    defn_ptr newdef = malloc(sizeof(*newdef));
+    newdef->fun = run_defn_list;
+    newdef->compile_fun = default_compile;
+    dp = malloc(sizeof(*dp));
+    dp->next = 0;
+    dp->fun = run_addr;  // TODO: This is the same as above except here.
+    dp->n = 0;
+    dp->array = 0;
+    newdef->list = dp;
+    blt_put(dict, word, newdef);
+  }), CLOSURE({
+    RUN_NEW_FUN(w, run_create);
+    w->branch[0] = 0;
+    tail = &w->next;
+    last_create = w;
+  }));
+
+  add_dict(",", CLOSURE({
+    if (!dp) THROW("create expected");
+    mpz_ptr z = POPZ;
+    dp->array = realloc(dp->array, ++dp->n * sizeof(mpz_t));
+    mpz_init_set(dp->array[dp->n - 1], z);
+  }));
+
+  add_dict("@", CLOSURE({
+    mpz_ptr z = POPZ;
+    push((mpz_ptr) (mpz_get_ui(z) * sizeof(mpz_t)));
+  }));
+
+  add_dict("!", CLOSURE({
+    mpz_ptr z = POPZ;
+    mpz_ptr x = POPZ;
+    mpz_set((mpz_ptr) (mpz_get_ui(z) * sizeof(mpz_t)), x);
+  }));
+
+  add_dict_compile("does>", CLOSURE({
+    if (!last_create) THROW("expected create");
+    tail = &last_create->branch[0];
+  }));
 
   add_dict(":", CLOSURE({
     if (!get_word()) THROW("empty definition");
@@ -413,12 +519,39 @@ int main() {
     tail = &w->next;
   }));
 
+  add_dict("quit", CLOSURE({ THROW(""); }));
+
+  // Load presets.
+  quiet = 1;
+  for(char **p = (char *[]){
+    ": ? @ . ;",
+    ": 1+ 1 + ;",
+    ": 0> 0 > ;",
+    ": space 32 emit ;",
+    ": spaces dup 0> if 0 do space loop then ;",
+    ": constant create , does> @ ;",
+    ": variable create 0 , ;",
+    "32 constant bl",
+     0,
+  }; *p; p++) {
+    char *s = strdup(*p);
+    go(s);
+    char *upper = strdup(*p);
+    for (char *c = upper; *c; c++) *c = toupper(*c);
+    if (strcmp(upper, *p)) go(upper);
+    free(upper);
+    free(s);
+  }
+  quiet = 0;
+
+  // Main loop.
   for(char *s; (s = readline("")); free(s)) if (*s) add_history(s), go(s);
 
+  // Clean up.
   for(int i = 0; i < stack_record; i++) mpz_clear(stack[i]);
   free(stack);
   blt_forall(dict, ({void _(BLT_IT *it) { defn_clear(it->data); }_;}));
   blt_clear(dict);
-  mpz_clear(z_emit);
+  mpz_clear(z_tmp);
   return 0;
 }
