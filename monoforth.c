@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 #include <gmp.h>
@@ -359,6 +360,13 @@ int main() {
 
   add_dict(".", CLOSURE({ gmp_printf("%Zd ", POPZ); }));
 
+  add_dict(".S", CLOSURE({
+    printf("<%d> ", stack_i);
+    for (int i = 0; i < stack_i; i++) {
+      gmp_printf("%Zd ", stack[i]);
+    }
+  }));
+
   add_dict("cr", CLOSURE({ putchar('\n'); }));
 
   mpz_t z_tmp;
@@ -413,22 +421,33 @@ int main() {
   DICT_MPZ("or", mpz_ior);
   DICT_MPZ("xor", mpz_xor);
 
+  add_dict("invert", CLOSURE({
+    mpz_ptr z = PEEPZ;
+    mpz_com(z, z);
+  }));
+
   add_dict("<", CLOSURE({
     mpz_ptr x = POPZ;
     mpz_ptr z = PEEPZ;
-    mpz_set_ui(z, mpz_cmp(z, x) < 0);
+    mpz_set_si(z, -(mpz_cmp(z, x) < 0));
   }));
 
   add_dict(">", CLOSURE({
     mpz_ptr x = POPZ;
     mpz_ptr z = PEEPZ;
-    mpz_set_ui(z, mpz_cmp(z, x) > 0);
+    mpz_set_si(z, -(mpz_cmp(z, x) > 0));
   }));
 
   add_dict("=", CLOSURE({
     mpz_ptr x = POPZ;
     mpz_ptr z = PEEPZ;
-    mpz_set_ui(z, !mpz_cmp(z, x));
+    mpz_set_si(z, -!mpz_cmp(z, x));
+  }));
+
+  add_dict("<>", CLOSURE({
+    mpz_ptr x = POPZ;
+    mpz_ptr z = PEEPZ;
+    mpz_set_si(z, -!!mpz_cmp(z, x));
   }));
 
   void run_defn_list() { run_list(defn->list); }
@@ -525,13 +544,20 @@ int main() {
   quiet = 1;
   for(char **p = (char *[]){
     ": ? @ . ;",
+    ": 1- 1 - ;",
     ": 1+ 1 + ;",
     ": 0> 0 > ;",
+    ": 0= 0 = ;",
+    ": 0< 0 < ;",
+    ": 0<> 0 <> ;",
+    ": ?dup dup if dup then ;",
     ": space 32 emit ;",
     ": spaces dup 0> if 0 do space loop then ;",
     ": constant create , does> @ ;",
     ": variable create 0 , ;",
     "32 constant bl",
+    "-1 constant true",
+    "0 constant false",
      0,
   }; *p; p++) {
     char *s = strdup(*p);
@@ -544,8 +570,24 @@ int main() {
   }
   quiet = 0;
 
+  // Disable readline for non-interactive sessions.
+  // This makes life easier for tests.
+  char *(*liner)() = ({char*_() { return readline(""); }_;});
+  if (!isatty(STDIN_FILENO)) liner = ({char*_(){
+    char *r = 0;
+    size_t n;
+    if (-1 == getline(&r, &n, stdin)) {
+      free(r);
+      r = 0;
+    } else {
+      char *c = r + strlen(r) - 1;
+      if (*c == '\n') *c = 0;
+    }
+    return r;
+  }_;});
+
   // Main loop.
-  for(char *s; (s = readline("")); free(s)) if (*s) add_history(s), go(s);
+  for(char *s; (s = liner()); free(s)) if (*s) add_history(s), go(s);
 
   // Clean up.
   for(int i = 0; i < stack_record; i++) mpz_clear(stack[i]);
