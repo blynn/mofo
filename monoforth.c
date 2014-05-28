@@ -112,11 +112,14 @@ int main() {
     if (*c) *c++ = 0;
     return *word;
   }
-  void get_until_quote() {
+  void get_until(char x) {
     word = c;
-    while (*c && *c != '"') c++;
-    if (*c) *c++ = 0;  // EOL also terminates strings.
+    while (*c && *c != x) c++;
+    if (*c) *c++ = 0;  // EOL also terminates the search.
   }
+
+  void get_until_quote() { get_until('"'); }
+  void get_until_rparen() { get_until(')'); }
 
   void run_int(run_ptr w) { push(w->z); }
 
@@ -392,6 +395,12 @@ int main() {
     grow();
   }));
 
+  add_dict("nip", CLOSURE({
+    mpz_ptr x = POPZ;
+    mpz_ptr y = PEEPZ;
+    mpz_set(y, x);
+  }));
+
   add_dict("over", CLOSURE({
     POPZ;
     mpz_ptr x = PEEPZ;
@@ -411,6 +420,7 @@ int main() {
 
 #define DICT_MPZ(_op_, _mpz_fun_) add_dict(_op_, CLOSURE({ \
       mpz_ptr z = POPZ; mpz_ptr x = PEEPZ; _mpz_fun_(x, x, z); }));
+#define MPZOP2(_z_, _x_, _y_, _body_) ({void _(mpz_t _z_, mpz_t _x_, mpz_t _y_) _body_ _;})
 
   DICT_MPZ("+", mpz_add);
   DICT_MPZ("-", mpz_sub);
@@ -421,33 +431,26 @@ int main() {
   DICT_MPZ("or", mpz_ior);
   DICT_MPZ("xor", mpz_xor);
 
+  DICT_MPZ("<", MPZOP2(z, x, y, { mpz_set_si(z, -(mpz_cmp(x, y) < 0)); }));
+  DICT_MPZ(">", MPZOP2(z, x, y, { mpz_set_si(z, -(mpz_cmp(x, y) > 0)); }));
+  DICT_MPZ("=", MPZOP2(z, x, y, { mpz_set_si(z, -!mpz_cmp(x, y)); }));
+  DICT_MPZ("<>", MPZOP2(z, x, y, { mpz_set_si(z, -!!mpz_cmp(x, y)); }));
+  DICT_MPZ("min", MPZOP2(z, x, y, { mpz_set(z, mpz_cmp(x, y) < 0 ? x : y); }));
+  DICT_MPZ("max", MPZOP2(z, x, y, { mpz_set(z, mpz_cmp(x, y) > 0 ? x : y); }));
+
   add_dict("invert", CLOSURE({
     mpz_ptr z = PEEPZ;
     mpz_com(z, z);
   }));
 
-  add_dict("<", CLOSURE({
-    mpz_ptr x = POPZ;
+  add_dict("negate", CLOSURE({
     mpz_ptr z = PEEPZ;
-    mpz_set_si(z, -(mpz_cmp(z, x) < 0));
+    mpz_neg(z, z);
   }));
 
-  add_dict(">", CLOSURE({
-    mpz_ptr x = POPZ;
+  add_dict("abs", CLOSURE({
     mpz_ptr z = PEEPZ;
-    mpz_set_si(z, -(mpz_cmp(z, x) > 0));
-  }));
-
-  add_dict("=", CLOSURE({
-    mpz_ptr x = POPZ;
-    mpz_ptr z = PEEPZ;
-    mpz_set_si(z, -!mpz_cmp(z, x));
-  }));
-
-  add_dict("<>", CLOSURE({
-    mpz_ptr x = POPZ;
-    mpz_ptr z = PEEPZ;
-    mpz_set_si(z, -!!mpz_cmp(z, x));
+    mpz_abs(z, z);
   }));
 
   void run_defn_list() { run_list(defn->list); }
@@ -457,7 +460,6 @@ int main() {
   void run_addr(run_ptr w) {
     mpz_set_ui(z_tmp, (long) w->array / sizeof(mpz_t));
     push(z_tmp);
-    //run_list(w->next);
   }
 
   void run_create(run_ptr w) {
@@ -538,6 +540,10 @@ int main() {
     tail = &w->next;
   }));
 
+  add_dict_full("(", get_until_rparen, get_until_rparen);
+
+  add_dict("state", CLOSURE({ grow(); mpz_set_ui(PEEPZ, state); }));
+
   add_dict("quit", CLOSURE({ THROW(""); }));
 
   // Load presets.
@@ -546,15 +552,20 @@ int main() {
     ": ? @ . ;",
     ": 1- 1 - ;",
     ": 1+ 1 + ;",
+    ": 2* 2 * ;",
+    ": 2/ 2 / ;",
     ": 0> 0 > ;",
     ": 0= 0 = ;",
     ": 0< 0 < ;",
     ": 0<> 0 <> ;",
     ": ?dup dup if dup then ;",
+    ": cell+ 1+ ;",
+    ": cells 1 * ;",
     ": space 32 emit ;",
     ": spaces dup 0> if 0 do space loop then ;",
     ": constant create , does> @ ;",
     ": variable create 0 , ;",
+    ": type 0 do dup @ emit 1+ loop ;",
     "32 constant bl",
     "-1 constant true",
     "0 constant false",
