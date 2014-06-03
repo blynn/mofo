@@ -46,6 +46,8 @@ func TestStartingForthExamples(t *testing.T) {
     { ": DIFFERENCE - ABS ; 37 52 DIFFERENCE .", "15 " },
     { ": COMMISSION   10 /  50 MIN ; 600 COMMISSION .", "50 " },
     { ": COMMISSION   10 /  50 MIN ; 450 COMMISSION .", "45 " },
+    { ": noname >R SWAP R> ; 2 3 1 noname .S", "<3> 3 2 1 " },
+    { ": QUADRATIC  ( a b c x -- n ) >R SWAP ROT R@ *  + R> *  + ; 2 7 9 3 QUADRATIC .", "48 " },
 
     // Chapter 6.
     { ": DECADE  10 0 DO  I .  LOOP ; DECADE", "0 1 2 3 4 5 6 7 8 9 " },
@@ -75,4 +77,10 @@ func TestRecursion(t *testing.T) {
   } {
     oneliner(t, v.in, v.out)
   }
+}
+
+func TestBeginAgain(t *testing.T) {
+  // Implicitly tests Chapter 11 of Brodie, because we define:
+  //   : begin here ; immediate
+  oneliner(t, ": foo begin 1+ dup . dup 50 = if exit then again ; 47 foo", "48 49 50 ")
 }
