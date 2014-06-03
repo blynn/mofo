@@ -11,7 +11,7 @@ func oneliner(t *testing.T, in, out string) {
   c.Stdin = strings.NewReader(in)
   b, err := c.CombinedOutput()
   if err != nil {
-    t.Fatal("runtime error:", err)
+    t.Fatal("input:", in, "runtime error:", err)
   }
   s := string(b)
   want := out + " ok\n";
@@ -42,6 +42,7 @@ func TestStartingForthExamples(t *testing.T) {
     { ": BOXTEST ( length width height -- ) 6 >  ROT 22 >  ROT 19 >  AND AND IF .\" Big enough\" THEN ; 23 20 7 BOXTEST", "Big enough" },
 
     // Chapter 5.
+    { ": R%  10 */  5 +  10 / ; 227 32 R% .", "73 " },
     { ": DIFFERENCE - ABS ; 52 37 DIFFERENCE .", "15 " },
     { ": DIFFERENCE - ABS ; 37 52 DIFFERENCE .", "15 " },
     { ": COMMISSION   10 /  50 MIN ; 600 COMMISSION .", "50 " },

@@ -20,9 +20,18 @@
 struct defn_s {
   char immediate, compile_only;
   void **cell;
-  int n;
+  uint64_t n, vloc;
 };
 typedef struct defn_s *defn_ptr;
+
+defn_ptr defn_new(char immediate, char compile_only) {
+  defn_ptr r = malloc(sizeof(*r));
+  r->compile_only = compile_only;
+  r->immediate = immediate;
+  r->vloc = r->n = 0;
+  r->cell = 0;
+  return r;
+}
 
 void **defn_grow(defn_ptr defn) {
   defn->cell = realloc(defn->cell, ++defn->n * sizeof(void *));
@@ -35,22 +44,9 @@ mpz_ptr mpz_new() {
   return r;
 }
 
-mpz_ptr mpz_dup(mpz_ptr z) {
-  mpz_ptr r = malloc(sizeof(mpz_t));
-  mpz_init_set(r, z);
-  return r;
-}
-
 void mpz_free(mpz_ptr p) {
   mpz_clear(p);
   free(p);
-}
-
-int is_num(char *c) {
-  if (!*c) return 0;
-  if (*c == '-') c++;
-  for (; *c; c++) if (!isdigit(*c)) return 0;
-  return 1;
 }
 
 void toutf8(void (*f)(char), uint32_t x) {
@@ -126,7 +122,6 @@ void stack_push_mpz(stack_ptr st, mpz_ptr v) {
 
 int main() {
   void **quit_loop_hack;
-  defn_ptr interpret_def;
   BLT *dict = blt_new();
   stack_ptr dstack = stack_new_mpz();
   stack_ptr ijstack = stack_new_mpz();
@@ -156,28 +151,35 @@ int main() {
 
   void *run_exit[] = {ANON({ ip = stack_pop(rstack); })};
 
-  void *run_jmp[] = {ANON({ ip += (intptr_t) *ip; })};
-
-  void *run_jz[] = {ANON({
-    mpz_ptr z = POPZ;
-    ip += mpz_sgn(z) ? 1 : (intptr_t) *ip ;
-  })};
-
   defn_ptr curdef = 0;
-  void compile(void *p) { *defn_grow(curdef) = p; }
+  uint64_t here = 0;
+  BLT *vmem = blt_new();
+  void vmem_record(void *p) {
+    char key[17];
+    sprintf(key, "%016lx", here);
+    blt_put(vmem, key, p);
+  }
+  void **vmem_fetch(int64_t n) {
+    char key[17];
+    sprintf(key, "%016lx", n);
+    BLT_IT *it = blt_floor(vmem, key);
+    uint64_t m = strtol(it->key, 0, 16);
+    n -= m;
+    defn_ptr defn = it->data;
+    return n < defn->n ? defn->cell + n : 0;
+  }
 
-  defn_ptr new_defn(char immediate, char compile_only) {
-    defn_ptr r = malloc(sizeof(*r));
-    r->compile_only = compile_only;
-    r->immediate = immediate;
-    r->n = 0;
-    r->cell = 0;
-    return r;
+  void compile(void *p) { *defn_grow(curdef) = p, here++; }
+
+  void curdef_new(char immediate, char compile_only) {
+    curdef = defn_new(immediate, compile_only);
+    vmem_record(curdef);
+    curdef->vloc = here;
   }
 
   void add_dict_full(char *word, void (*fun)(),
       char immediate, char compile_only) {
-    curdef = new_defn(immediate, compile_only);
+    curdef_new(immediate, compile_only);
     compile(fun);
     blt_put(dict, word, curdef);
 
@@ -195,39 +197,18 @@ int main() {
     add_dict_full(word, fun, 1, 1);
   }
 
-  add_dict("here", ANON({
-    if (!curdef) ABORT("TODO: memory mapper");
-    mpz_set_ui(*stack_grow(dstack), curdef->n);
-  }));
+  add_dict("here", ANON({ mpz_set_ui(*stack_grow(dstack), here); }));
 
-  add_dict_full("(jmp)", ANON({
-    compile(run_jmp);
-    intptr_t offset = mpz_get_ui(POPZ);
-    compile((void *) (offset - curdef->n));
-  }), 0, 1);
+  add_dict_full("(jmp)", ANON({ ip += (intptr_t) *ip; }), 0, 1);
+
+  void *run_jmp = curdef->cell;
 
   add_dict_full("(jz)", ANON({
-    compile(run_jz);
-    intptr_t offset = mpz_get_ui(POPZ);
-    compile((void *) (offset - curdef->n));
+    mpz_ptr z = POPZ;
+    ip += mpz_sgn(z) ? 1 : (intptr_t) *ip ;
   }), 0, 1);
 
-  add_dict_compile("if", ANON({
-    compile(run_jz);
-    mpz_set_ui(*stack_grow(dstack), curdef->n);
-    compile(0);
-  }));
-  add_dict_compile("else", ANON({
-    intptr_t offset = mpz_get_ui(POPZ);
-    compile(run_jmp);
-    mpz_set_ui(*stack_grow(dstack), curdef->n);
-    compile(0);
-    curdef->cell[offset] = (void *) (curdef->n - offset);
-  }));
-  add_dict_compile("then", ANON({
-    intptr_t offset = mpz_get_ui(POPZ);
-    curdef->cell[offset] = (void *) (curdef->n - offset);
-  }));
+  void *run_jz = curdef->cell;
 
   add_dict_full(">r", ANON({
     mpz_ptr z = POPZ;
@@ -269,30 +250,30 @@ int main() {
     mpz_set_si(inc, cont < 0);
   })};
 
-  void *run_leave[] = {ANON({
-    stack_pop(ijstack);
-    stack_pop(ijstack);
-  })};
+  add_dict("2rdrop", ANON({ ijstack->i -= 2; }));
+
+  void *run_2rdrop = curdef->cell;
 
   add_dict_compile("loop", ANON({
     compile(run_loop_check);
     compile(run_jz);
-    intptr_t offset = mpz_get_ui(POPZ);
-    compile((void *) (offset - curdef->n));
-    compile(run_leave);
+    intptr_t offset = mpz_get_ui(stack_pop(ijstack));
+    compile((void *) (offset - here));
+    compile(run_2rdrop);
+    while((offset = mpz_get_ui(stack_pop(ijstack)))) {
+      *vmem_fetch(offset) = (void *) (here - offset);
+    }
   }));
 
   add_dict_compile("+loop", ANON({
     compile(run_ploop_check);
     compile(run_jz);
-    intptr_t offset = mpz_get_ui(POPZ);
-    compile((void *) (offset - curdef->n));
-    compile(run_leave);
-  }));
-
-  add_dict_compile("leave", ANON({
-    compile(run_leave);
-    POPZ;
+    intptr_t offset = mpz_get_ui(stack_pop(ijstack));
+    compile((void *) (offset - here));
+    compile(run_2rdrop);
+    while((offset = mpz_get_ui(stack_pop(ijstack)))) {
+      *vmem_fetch(offset) = (void *) (here - offset);
+    }
   }));
 
   add_dict_full("j", ANON({
@@ -309,7 +290,26 @@ int main() {
     toutf8((void (*)(char)) putchar, mpz_get_ui(z));
   }));
 
-  add_dict(".", ANON({ gmp_printf("%Zd ", POPZ); }));
+  void **base;
+  int get_base() {
+    int r = (intptr_t) *base;
+    if (r < 2 || r > 62) return 10;
+    return r;
+  }
+  add_dict(".", ANON({
+    mpz_ptr z = POPZ;
+    mpz_out_str(stdout, (uintptr_t) *base, z);
+    putchar(' ');
+  }));
+
+  add_dict("u.r", ANON({
+    mpz_ptr z = POPZ;
+    int n = mpz_get_si(z);
+    char fmt[8];
+    // TODO: Number base.
+    if (n > 0 && n <= 1024) sprintf(fmt, "%%%dZd", n); else strcpy(fmt, "%Zd");
+    gmp_printf(fmt, POPZ);
+  }));
 
   add_dict(".s", ANON({
     printf("<%d> ", dstack->i);
@@ -375,55 +375,43 @@ int main() {
   DICT_MPZ("or", mpz_ior);
   DICT_MPZ("xor", mpz_xor);
 
-  DICT_MPZ("<", MPZOP2(z, x, y, { mpz_set_si(z, -(mpz_cmp(x, y) < 0)); }));
-  DICT_MPZ(">", MPZOP2(z, x, y, { mpz_set_si(z, -(mpz_cmp(x, y) > 0)); }));
-  DICT_MPZ("=", MPZOP2(z, x, y, { mpz_set_si(z, -!mpz_cmp(x, y)); }));
-  DICT_MPZ("<>", MPZOP2(z, x, y, { mpz_set_si(z, -!!mpz_cmp(x, y)); }));
+  DICT_MPZ("<",   MPZOP2(z, x, y, { mpz_set_si(z, -(mpz_cmp(x, y) < 0)); }));
+  DICT_MPZ(">",   MPZOP2(z, x, y, { mpz_set_si(z, -(mpz_cmp(x, y) > 0)); }));
+  DICT_MPZ("=",   MPZOP2(z, x, y, { mpz_set_si(z, -!mpz_cmp(x, y)); }));
+  DICT_MPZ("<>",  MPZOP2(z, x, y, { mpz_set_si(z, -!!mpz_cmp(x, y)); }));
   DICT_MPZ("min", MPZOP2(z, x, y, { mpz_set(z, mpz_cmp(x, y) < 0 ? x : y); }));
   DICT_MPZ("max", MPZOP2(z, x, y, { mpz_set(z, mpz_cmp(x, y) > 0 ? x : y); }));
+  DICT_MPZ("lshift", MPZOP2(z, x, y, { mpz_mul_2exp(z, x, mpz_get_ui(y)); }));
 
-  add_dict("invert", ANON({
-    mpz_ptr z = PEEPZ;
-    mpz_com(z, z);
-  }));
+  add_dict("invert", ANON({ mpz_ptr z = PEEPZ; mpz_com(z, z); }));
+  add_dict("negate", ANON({ mpz_ptr z = PEEPZ; mpz_neg(z, z); }));
+  add_dict("abs",    ANON({ mpz_ptr z = PEEPZ; mpz_abs(z, z); }));
 
-  add_dict("negate", ANON({
-    mpz_ptr z = PEEPZ;
-    mpz_neg(z, z);
-  }));
-
-  add_dict("abs", ANON({
-    mpz_ptr z = PEEPZ;
-    mpz_abs(z, z);
-  }));
-
-  void colon_codeword(void **p) {
+  void codeword_colon(void **p) {
     stack_push(rstack, ip);
     ip = p + 1;
   }
 
   add_dict(":", ANON({
     if (!get_word()) ABORT("empty name");
-    curdef = new_defn(0, 0);
+    curdef_new(0, 0);
     blt_put(dict, word, curdef);
     state = 1;
-    compile(colon_codeword);
+    compile(codeword_colon);
   }));
 
   add_dict_compile("exit", ANON({ compile(run_exit); }));
 
-  add_dict_compile(";", ANON({
-    compile(run_exit);
-    state = 0;
-  }));
+  add_dict_compile(";", ANON({ compile(run_exit); state = 0; }));
 
+  defn_ptr sentinel_def = 0;
   add_dict("immediate", ANON({
-    if (!curdef) ABORT("no definition");
+    if (curdef == sentinel_def) ABORT("no definition");
     curdef->immediate = 1;
   }));
 
   add_dict("compile-only", ANON({
-    if (!curdef) ABORT("no definition");
+    if (curdef == sentinel_def) ABORT("no definition");
     curdef->compile_only = 1;
   }));
 
@@ -442,48 +430,88 @@ int main() {
     }
   }));
 
-  void create_codeword(void **p) {
-    mpz_set_ui(*stack_grow(dstack), (long) (p + 2) / sizeof(void *));
+  add_dict("'", ANON({
+    if (!get_word()) ABORT("empty name");
+    BLT_IT *it = blt_get(dict, word);
+    if (!it) ABORT("name not found");
+    defn_ptr defn = it->data;
+    mpz_set_ui(*stack_grow(dstack), defn->vloc);
+  }));
+
+  add_dict_compile("[']", ANON({
+    if (!get_word()) ABORT("empty name");
+    BLT_IT *it = blt_get(dict, word);
+    if (!it) ABORT("name not found");
+    defn_ptr defn = it->data;
+    mpz_ptr z = mpz_new();
+    mpz_init_set_ui(z, defn->vloc);
+    compile(run_literal);
+    compile(z);
+  }));
+
+  add_dict("execute", ANON({
+    mpz_ptr z = POPZ;
+    uint64_t n = mpz_get_ui(z);
+    void **p = vmem_fetch(n);
+    ((void (*)(void *))*p)(p);
+  }));
+
+  void codeword_create(void **p) {
+    mpz_set_ui(*stack_grow(dstack), (uintptr_t) p[1]);
   }
 
-  void create_does_codeword(void **p) {
-    mpz_set_ui(*stack_grow(dstack), (long) (p + 2) / sizeof(void *));
+  void codeword_does(void **p) {
+    mpz_set_ui(*stack_grow(dstack), (uintptr_t) p[1]);
     stack_push(rstack, ip);
-    ip = p[1];
+    ip = p[2];
   }
 
   add_dict("create", ANON({
     if (!get_word()) ABORT("empty name");
-    curdef = new_defn(0, 0);
+    curdef_new(0, 0);
     blt_put(dict, word, curdef);
-    compile(create_codeword);
+    compile(codeword_create);
+    compile((void *) (here + 2));
     compile(0);
   }));
 
   add_dict_full("does>", ANON({
-    curdef->cell[0] = create_does_codeword;
-    curdef->cell[1] = ip;
+    curdef->cell[0] = codeword_does;
+    curdef->cell[2] = ip;
     ip = stack_pop(rstack);
   }), 0, 1);
 
+  // TODO: Switch to mpz for sufficiently large integers.
   add_dict(",", ANON({
-    if (!curdef) ABORT("TODO: memory mapper");
     mpz_ptr z = POPZ;
-    compile(mpz_dup(z));
+    intptr_t n = mpz_get_si(z);
+    compile((void *) n);
   }));
 
   add_dict("@", ANON({
-    mpz_ptr z = POPZ;
-    stack_push_mpz(dstack, *(void **) (mpz_get_ui(z) * sizeof(void *)));
+    mpz_ptr z = PEEPZ;
+    uint64_t n = mpz_get_ui(z);
+    void **p = vmem_fetch(n);
+    if (!p) ABORT("bad address");
+    mpz_set_si(z, (intptr_t) *p);
   }));
 
   add_dict("!", ANON({
-    mpz_ptr z = POPZ;
+    mpz_ptr addr = POPZ;
+    uint64_t n = mpz_get_ui(addr);
+    void **p = vmem_fetch(n);
+    if (!p) ABORT("bad address");
     mpz_ptr x = POPZ;
-    mpz_set(*(void **) (mpz_get_ui(z) * sizeof(void *)), x);
+    n = mpz_get_ui(x);
+    *p = (void *) n;
   }));
 
+  uint64_t base_addr;
+  add_dict("base", ANON({ mpz_set_ui(*stack_grow(dstack), base_addr); }));
+
   add_dict_full("(", get_until_rparen, 1, 0);
+
+  add_dict_full("\\", ANON({ get_until(0); }), 1, 0);
 
   add_dict("state", ANON({ stack_grow(dstack); mpz_set_ui(PEEPZ, state); }));
 
@@ -496,6 +524,11 @@ int main() {
   }));
 
   int bye = 0;
+
+  add_dict("bye", ANON({ bye = 1; }));
+
+  void *run_bye = curdef->cell;
+
   void cpu_loop() { while (!bye) {
     void **cell = *ip++;
     void (*fun)(void *) = *cell;
@@ -552,23 +585,26 @@ int main() {
           ((void (*)(void *))*defn->cell)(defn->cell);
         }
       }
-    } else if (is_num(word)) {
+    } else {
+      if (mpz_set_str(*stack_grow(dstack), word, get_base())) {
+        ABORT("bad word");
+      }
       if (state == 1) {
         mpz_ptr z = mpz_new();
-        mpz_set_str(z, word, 0);
+        mpz_set(z, stack_pop(dstack));
         compile(run_literal);
         compile(z);
-      } else {
-        stack_grow(dstack);
-        mpz_set_str(dstack->p[dstack->i - 1], word, 0);
       }
-    } else {
-      ABORT("bad word");
     }
   }
 
-  curdef = new_defn(0, 0);
-  compile(colon_codeword);
+  curdef_new(0, 0);
+  base_addr = here;
+  compile((void *) 10);
+  base = vmem_fetch(base_addr);
+
+  curdef_new(0, 0);
+  compile(codeword_colon);
   compile((void*[]){ANON({ mpz_set_si(*stack_grow(dstack), -!!get_word()); })});
   compile(run_jz);
   compile((void *) 4);
@@ -576,14 +612,13 @@ int main() {
   compile(run_jmp);
   compile((void *) -5);
   compile(run_exit);
-  interpret_def = curdef;
+  void *run_interpret = curdef->cell;
 
-  void *hack[] = { interpret_def->cell, (void *[]){ ANON({ bye = 1; }) } };
+  void *hack[] = { run_interpret, run_bye };
   void go(char *line) {
     cursor = line;
     ip = hack;
     cpu_loop();
-    bye = 0;
   }
 
   // Load presets.
@@ -601,7 +636,16 @@ int main() {
     ": 2>r swap >r >r ;",
     ": 2dup over over ;",
     ": 2drop drop drop ;",
-    ": do postpone 2>r here ; immediate compile-only",
+    ": if postpone (jz) here 0 , ; immediate compile-only",
+    ": else postpone (jmp) here 0 , over dup here swap - swap ! ; immediate compile-only",
+    ": then dup here swap - swap ! ; immediate compile-only",
+    ": begin here ; immediate compile-only",
+    ": again postpone (jmp) here - , ; immediate compile-only",
+    ": until (jz) here - , ; immediate compile-only",
+    ": while postpone (jz) here 0 , swap ; immediate compile-only",
+    ": repeat postpone (jmp) here - , dup here swap - swap ! ; immediate compile-only",
+    ": do postpone 2>r 0 here 2>r ; immediate compile-only",
+    ": leave postpone 2rdrop postpone (jmp) here r> 2>r 0 , ; immediate compile-only",
     ": i r@ ; compile-only",
     ": ?dup dup if dup then ;",
     ": cell+ 1+ ;",
@@ -614,9 +658,8 @@ int main() {
     "32 constant bl",
     "-1 constant true",
     "0 constant false",
-    ": begin here ; immediate",
-    ": again (jmp) ; immediate",
-    ": until (jz) ; immediate",
+    ": decimal 10 base ! ;",
+    ": hex 16 base ! ;",
      0,
   }; *p; p++) {
     char *s = strdup(*p);
@@ -636,15 +679,16 @@ int main() {
     (void *[]){ accept_input },
     run_jz,
     (void *) 5,
-    interpret_def->cell,
+    run_interpret,
     (void *[]){ ANON({ puts(state == 1 ? " compile" : " ok"); }) },
     run_jmp,
     (void *) -7,
-    (void *[]){ ANON({ bye = 1; }) },
+    run_bye,
   };
   quit_loop_hack = quit_loop;
   ip = quit_loop;
-  curdef = 0;
+  curdef_new(0, 0);
+  sentinel_def = curdef;
   cpu_loop();
 
   // Clean up. TODO: Lots!
