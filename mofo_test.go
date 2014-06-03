@@ -16,7 +16,7 @@ func oneliner(t *testing.T, in, out string) {
   s := string(b)
   want := out + " ok\n";
   if s != want {
-    t.Error("want:", want, "got:", s);
+    t.Error("input:", in, "\nwant:", want, "got:", s);
   }
 }
 
