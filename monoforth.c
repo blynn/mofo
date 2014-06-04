@@ -112,15 +112,11 @@ void **stack_grow(stack_ptr st) {
   return st->p + st->i - 1;
 }
 
-int stack_empty(stack_ptr st) { return !st->i; }
-
-void *stack_peep(stack_ptr st) { return st->p[st->i - 1]; }
-
-void *stack_pop(stack_ptr st) { return st->p[--st->i]; }
-
-void stack_push(stack_ptr st, void *p) { *stack_grow(st) = p; }
-
-void stack_push_mpz(stack_ptr st, mpz_ptr v) {
+int   stack_empty(stack_ptr st) { return !st->i; }
+void *stack_peep (stack_ptr st) { return st->p[st->i - 1]; }
+void *stack_pop  (stack_ptr st) { return st->p[--st->i]; }
+void  stack_push (stack_ptr st, void *p) { *stack_grow(st) = p; }
+void  stack_push_mpz(stack_ptr st, mpz_ptr v) {
   if (!st->is_mpz) fprintf(stderr, "BUG!\n"), exit(1);
   mpz_set(*stack_grow(st), v);
 }
@@ -147,7 +143,6 @@ int main(int argc, char **argv) {
   }
 
   void get_until_quote() { get_until('"'); }
-  void get_until_rparen() { get_until(')'); }
 
   void **ip = 0;
 
@@ -155,11 +150,10 @@ int main(int argc, char **argv) {
 
   void *run_literal_ui[] = {ANON({ mpz_set_ui(*stack_grow(dstack), (uintptr_t) *ip++); })};
 
-  void *run_exit[] = {ANON({ ip = stack_pop(rstack); })};
-
-  void cpu_run(void (**p)(void *)) { (*p)(p); }
+  void cpu_run(void *p) { (*((void (**)(void *)) p))(p); }
 
   defn_ptr curdef = 0;
+  defn_ptr sentinel_def = 0;
   uint64_t here = 0;
   BLT *vmem = blt_new();
   void vmem_record(void *p) {
@@ -206,49 +200,47 @@ int main(int argc, char **argv) {
     }
   }
 
-  void add_dict_full(char *word, void (*fun)(),
-      char immediate, char compile_only) {
+  void add_dict(char *word, void (*fun)(), char immediate, char compile_only) {
     curdef_new(immediate, compile_only);
     compile(fun);
     add_entry(word);
   }
 
-  void add_dict(char *word, void (*fun)()) {
-    add_dict_full(word, fun, 0, 0);
-  }
+#define DICT(   _word_,_fun_) add_dict(_word_,ANON(_fun_),0,0)
+#define DICT_C( _word_,_fun_) add_dict(_word_,ANON(_fun_),0,1)
+#define DICT_I( _word_,_fun_) add_dict(_word_,ANON(_fun_),1,0)
+#define DICT_IC(_word_,_fun_) add_dict(_word_,ANON(_fun_),1,1)
+#define FIND_DEFN ({ if (!get_word()) ABORT("empty name"); \
+    defn_ptr defn = find_defn(word); \
+    if (!defn) ABORT("name not found"); defn; })
 
-  void add_dict_compile(char *word, void (*fun)()) {
-    add_dict_full(word, fun, 1, 1);
-  }
+  // Seed enough words to define other core words.
 
-  add_dict("here", ANON({ mpz_set_ui(*stack_grow(dstack), here); }));
-
-  add_dict_full("(jmp)", ANON({ ip += (intptr_t) *ip; }), 0, 1);
-
-  add_dict_full("(jz)", ANON({
+  // Words I named.
+  DICT("usleep", { mpz_ptr z = PEEPZ; usleep(mpz_get_ui(z)); });
+  DICT("compile-only", {
+    if (curdef == sentinel_def) ABORT("no definition");
+    curdef->compile_only = 1;
+  });
+  DICT_C("2rdrop", { ijstack->i -= 2; });
+  void *run_2rdrop = curdef->cell;
+  DICT_C("(jmp)", { ip += (intptr_t) *ip; });
+  DICT_C("(jz)", {
     mpz_ptr z = POPZ;
     ip += mpz_sgn(z) ? 1 : (intptr_t) *ip ;
-  }), 0, 1);
-
+  });
   void *run_jz = curdef->cell;
 
-  add_dict_full(">r", ANON({
-    mpz_ptr z = POPZ;
-    stack_push_mpz(ijstack, z);
-  }), 0, 1);
+  // More "standard" words.
+  DICT("here", { mpz_set_ui(*stack_grow(dstack), here); });
 
-  add_dict_full("r>", ANON({
-    stack_push_mpz(dstack, stack_pop(ijstack));
-  }), 0, 1);
-
-  add_dict_full("r@", ANON({
-    stack_push_mpz(dstack, stack_peep(ijstack));
-  }), 0, 1);
-
-  add_dict_full("rclear", ANON({ stack_reset(rstack); }), 0, 1);
+  DICT_C(">r", { stack_push_mpz(ijstack, POPZ); });
+  DICT_C("r>", { stack_push_mpz(dstack, stack_pop(ijstack)); });
+  DICT_C("r@", { stack_push_mpz(dstack, stack_peep(ijstack)); });
+  DICT_C("rclear", { stack_reset(rstack); });
 
   void (*refill)();
-  add_dict("refill", ANON({ refill(); }));
+  DICT("refill", { refill(); });
 
   void *run_loop_check[] = {ANON({
     int i = ijstack->i;
@@ -277,11 +269,7 @@ int main(int argc, char **argv) {
     mpz_set_si(inc, cont < 0);
   })};
 
-  add_dict("2rdrop", ANON({ ijstack->i -= 2; }));
-
-  void *run_2rdrop = curdef->cell;
-
-  add_dict_compile("loop", ANON({
+  DICT_IC("loop", {
     compile(run_loop_check);
     compile(run_jz);
     intptr_t offset = mpz_get_ui(stack_pop(ijstack));
@@ -290,9 +278,9 @@ int main(int argc, char **argv) {
     while((offset = mpz_get_ui(stack_pop(ijstack)))) {
       *vmem_fetch(offset) = (void *) (here - offset);
     }
-  }));
+  });
 
-  add_dict_compile("+loop", ANON({
+  DICT_IC("+loop", {
     compile(run_ploop_check);
     compile(run_jz);
     intptr_t offset = mpz_get_ui(stack_pop(ijstack));
@@ -301,23 +289,19 @@ int main(int argc, char **argv) {
     while((offset = mpz_get_ui(stack_pop(ijstack)))) {
       *vmem_fetch(offset) = (void *) (here - offset);
     }
-  }));
+  });
 
-  add_dict_full("j", ANON({
-    stack_push_mpz(dstack, ijstack->p[ijstack->i - 3]);
-  }), 0, 1);
+  DICT_C("j", { stack_push_mpz(dstack, ijstack->p[ijstack->i - 3]); });
 
-  add_dict("usleep", ANON({ mpz_ptr z = PEEPZ; usleep(mpz_get_ui(z)); }));
+  DICT("cr", { putchar('\n'); });
 
-  add_dict("cr", ANON({ putchar('\n'); }));
-
-  add_dict("emit", ANON({
+  DICT("emit", {
     mpz_ptr z = *stack_grow(dstack);
     dstack->i--;
     mpz_set_ui(z, 0xffffffff);
     mpz_and(z, z, POPZ);
     toutf8((void (*)(char)) putchar, mpz_get_ui(z));
-  }));
+  });
 
   void **base;
   int get_base() {
@@ -325,200 +309,135 @@ int main(int argc, char **argv) {
     if (r < 2 || r > 62) return 10;
     return r;
   }
-  add_dict(".", ANON({
+  DICT(".", {
     mpz_ptr z = POPZ;
     mpz_out_str(stdout, (uintptr_t) *base, z);
     putchar(' ');
-  }));
+  });
 
-  add_dict(".r", ANON({
+  DICT(".r", {
     mpz_ptr z = POPZ;
     int n = mpz_get_si(z);
     char fmt[8];
     // TODO: Number base.
     if (n > 0 && n <= 1024) sprintf(fmt, "%%%dZd", n); else strcpy(fmt, "%Zd");
     gmp_printf(fmt, POPZ);
-  }));
+  });
 
-  add_dict(".s", ANON({
+  DICT(".s", {
     // TODO: Number base.
     printf("<%d> ", dstack->i);
     for (int i = 0; i < dstack->i; i++) {
       mpz_out_str(stdout, (uintptr_t) *base, dstack->p[i]);
       putchar(' ');
     }
-  }));
+  });
 
-  add_dict("char", ANON({
+  DICT("char", {
     if (!get_word()) ABORT("empty word");
     // TODO: Decode UTF-8.
     mpz_set_ui(*stack_grow(dstack), word[0]);
-  }));
+  });
 
-  add_dict_compile("[char]", ANON({
+  DICT_IC("[char]", {
     if (!get_word()) ABORT("empty word");
     // TODO: Decode UTF-8.
     compile(run_literal_ui);
     compile((void *) (uintptr_t) word[0]);
-  }));
+  });
 
-  add_dict("drop", ANON({ POPZ; }));
+#define DICT_STACK(_word_,_n_,_fun_) DICT(_word_, { \
+    if (dstack->i < _n_) ABORT("stack underflow"); \
+    void **p = dstack->p + dstack->i - 1; _fun_ })
+  void swap(void **p, void **q) { void *tmp = *p; *p = *q, *q = tmp; }
+  DICT("drop", { POPZ; });
+  DICT("dup", { stack_push_mpz(dstack, PEEPZ); });
+  DICT_STACK( "swap", 2, { swap(p, p-1); });
+  DICT_STACK("2swap", 4, { swap(p, p-2); swap(p-1, p-3); });
+  DICT_STACK(  "nip", 2, { swap(p, p-1); dstack->i--; });
+  DICT_STACK( "over", 2, { mpz_set(*stack_grow(dstack), *(p-1)); });
+  DICT_STACK(  "rot", 3, { swap(p, p-2); swap(p-1, p-2); });
+  DICT_STACK( "-rot", 3, { swap(p-1, p-2); swap(p, p-2); });
 
-  add_dict("dup", ANON({ stack_push_mpz(dstack, PEEPZ); }));
+#define DICT_MPZ_DIRECT(_op_, _mpz_fun_) DICT(_op_, { \
+    mpz_ptr x = POPZ; mpz_ptr z = PEEPZ; _mpz_fun_(z, z, x); });
+#define DICT_MPZ(_op_, _fun_) DICT(_op_, { \
+    mpz_ptr x = POPZ; mpz_ptr z = PEEPZ; _fun_})
+  DICT_MPZ_DIRECT("+", mpz_add);
+  DICT_MPZ_DIRECT("-", mpz_sub);
+  DICT_MPZ_DIRECT("*", mpz_mul);
+  DICT_MPZ_DIRECT("/", mpz_fdiv_q);
+  DICT_MPZ_DIRECT("mod", mpz_fdiv_r);
+  DICT_MPZ_DIRECT("and", mpz_and);
+  DICT_MPZ_DIRECT("or", mpz_ior);
+  DICT_MPZ_DIRECT("xor", mpz_xor);
 
-  add_dict("2swap", ANON({
-    if (dstack->i < 4) ABORT("stack underflow");
-    int n = dstack->i - 4;
-    void *tmp = dstack->p[n];
-    dstack->p[n] = dstack->p[n+2];
-    dstack->p[n+2] = tmp;
-    tmp = dstack->p[n+1];
-    dstack->p[n+1] = dstack->p[n+3];
-    dstack->p[n+3] = tmp;
-  }));
+  DICT_MPZ("<",   { mpz_set_si(z, -(mpz_cmp(z, x) < 0)); });
+  DICT_MPZ(">",   { mpz_set_si(z, -(mpz_cmp(z, x) > 0)); });
+  DICT_MPZ("=",   { mpz_set_si(z, -!mpz_cmp(z, x)); });
+  DICT_MPZ("<>",  { mpz_set_si(z, -!!mpz_cmp(z, x)); });
+  DICT_MPZ("min", { mpz_set(z, mpz_cmp(z, x) < 0 ? z : x); });
+  DICT_MPZ("max", { mpz_set(z, mpz_cmp(z, x) > 0 ? z : x); });
+  DICT_MPZ("lshift", { mpz_mul_2exp(z, z, mpz_get_ui(x)); });
 
-  add_dict("swap", ANON({
-    mpz_ptr x = POPZ;
-    mpz_ptr y = PEEPZ;
-    mpz_swap(x, y);
-    stack_grow(dstack);
-  }));
+  DICT("invert", { mpz_ptr z = PEEPZ; mpz_com(z, z); });
+  DICT("negate", { mpz_ptr z = PEEPZ; mpz_neg(z, z); });
+  DICT("abs",    { mpz_ptr z = PEEPZ; mpz_abs(z, z); });
 
-  add_dict("nip", ANON({
-    mpz_ptr x = POPZ;
-    mpz_ptr y = PEEPZ;
-    mpz_set(y, x);
-  }));
-
-  add_dict("over", ANON({
-    POPZ;
-    mpz_ptr x = PEEPZ;
-    stack_grow(dstack);
-    stack_push_mpz(dstack, x);
-  }));
-
-  add_dict("rot", ANON({
-    mpz_ptr x = POPZ;
-    mpz_ptr y = POPZ;
-    mpz_ptr z = PEEPZ;
-    mpz_swap(x, z);
-    mpz_swap(y, z);
-    stack_grow(dstack);
-    stack_grow(dstack);
-  }));
-
-  add_dict("-rot", ANON({
-    mpz_ptr x = POPZ;
-    mpz_ptr y = POPZ;
-    mpz_ptr z = PEEPZ;
-    mpz_swap(y, z);
-    mpz_swap(x, z);
-    stack_grow(dstack);
-    stack_grow(dstack);
-  }));
-
-#define DICT_MPZ(_op_, _mpz_fun_) add_dict(_op_, ANON({ \
-      mpz_ptr z = POPZ; mpz_ptr x = PEEPZ; _mpz_fun_(x, x, z); }));
-#define MPZOP2(_z_, _x_, _y_, _body_) ({void _(mpz_t _z_, mpz_t _x_, mpz_t _y_) _body_ _;})
-
-  DICT_MPZ("+", mpz_add);
-  DICT_MPZ("-", mpz_sub);
-  DICT_MPZ("*", mpz_mul);
-  DICT_MPZ("/", mpz_fdiv_q);
-  DICT_MPZ("mod", mpz_fdiv_r);
-  DICT_MPZ("and", mpz_and);
-  DICT_MPZ("or", mpz_ior);
-  DICT_MPZ("xor", mpz_xor);
-
-  DICT_MPZ("<",   MPZOP2(z, x, y, { mpz_set_si(z, -(mpz_cmp(x, y) < 0)); }));
-  DICT_MPZ(">",   MPZOP2(z, x, y, { mpz_set_si(z, -(mpz_cmp(x, y) > 0)); }));
-  DICT_MPZ("=",   MPZOP2(z, x, y, { mpz_set_si(z, -!mpz_cmp(x, y)); }));
-  DICT_MPZ("<>",  MPZOP2(z, x, y, { mpz_set_si(z, -!!mpz_cmp(x, y)); }));
-  DICT_MPZ("min", MPZOP2(z, x, y, { mpz_set(z, mpz_cmp(x, y) < 0 ? x : y); }));
-  DICT_MPZ("max", MPZOP2(z, x, y, { mpz_set(z, mpz_cmp(x, y) > 0 ? x : y); }));
-  DICT_MPZ("lshift", MPZOP2(z, x, y, { mpz_mul_2exp(z, x, mpz_get_ui(y)); }));
-
-  add_dict("invert", ANON({ mpz_ptr z = PEEPZ; mpz_com(z, z); }));
-  add_dict("negate", ANON({ mpz_ptr z = PEEPZ; mpz_neg(z, z); }));
-  add_dict("abs",    ANON({ mpz_ptr z = PEEPZ; mpz_abs(z, z); }));
+  DICT_IC("[", { state = 0; });
+  DICT("]", { state = 1; });
+  DICT("state", { stack_grow(dstack); mpz_set_ui(PEEPZ, state); });
 
   void codeword_colon(void **p) {
     stack_push(rstack, ip);
     ip = p + 1;
   }
-
-  add_dict_compile("[", ANON({ state = 0; }));
-  add_dict("]", ANON({ state = 1; }));
-  add_dict(":", ANON({
+  DICT(":", {
     if (!get_word()) ABORT("empty name");
     curdef_new(0, 0);
     add_entry(word);
     state = 1;
     compile(codeword_colon);
-  }));
+  });
 
-  add_dict("state", ANON({ stack_grow(dstack); mpz_set_ui(PEEPZ, state); }));
+  void *run_exit[] = {ANON({ ip = stack_pop(rstack); })};
+  DICT_IC("exit", { compile(run_exit); });
+  DICT_IC(";", { compile(run_exit); state = 0; });
 
-  add_dict_compile("exit", ANON({ compile(run_exit); }));
-
-  add_dict_compile(";", ANON({ compile(run_exit); state = 0; }));
-
-  add_dict_compile("literal", ANON({
+  DICT_IC("literal", {
     compile(run_literal);
     mpz_ptr z = mpz_new();
     mpz_init_set(z, POPZ);
     compile(z);
-  }));
+  });
 
-  defn_ptr sentinel_def = 0;
-  add_dict("immediate", ANON({
+  DICT("immediate", {
     if (curdef == sentinel_def) ABORT("no definition");
     curdef->immediate = 1;
-  }));
-
-  add_dict("compile-only", ANON({
-    if (curdef == sentinel_def) ABORT("no definition");
-    curdef->compile_only = 1;
-  }));
+  });
 
   void *run_compile[] = {ANON({ compile(*ip++); })};
-
-  add_dict_compile("postpone", ANON({
-    if (!get_word()) ABORT("empty name");
-    BLT_IT *it = blt_get(dict, word);
-    if (!it) ABORT("name not found");
-    defn_ptr defn = it->data;
+  DICT_IC("postpone", {
+    defn_ptr defn = FIND_DEFN;
     if (defn->immediate) {
       compile(defn->cell);
     } else {
       compile(run_compile);
       compile(defn->cell);
     }
-  }));
+  });
 
-  add_dict("'", ANON({
-    if (!get_word()) ABORT("empty name0");
-    BLT_IT *it = blt_get(dict, word);
-    if (!it) ABORT("name not found0");
-    defn_ptr defn = it->data;
-    mpz_set_ui(*stack_grow(dstack), defn->vloc);
-  }));
+  DICT("'", { mpz_set_ui(*stack_grow(dstack), FIND_DEFN->vloc); });
 
-  add_dict_compile("[']", ANON({
-    if (!get_word()) ABORT("empty name1");
-    BLT_IT *it = blt_get(dict, word);
-    if (!it) ABORT("name not found1");
-    defn_ptr defn = it->data;
+  DICT_IC("[']", {
     compile(run_literal_ui);
-    compile((void *) defn->vloc);
-  }));
+    compile((void *) FIND_DEFN->vloc);
+  });
 
-  add_dict("execute", ANON({
-    mpz_ptr z = POPZ;
-    uint64_t n = mpz_get_ui(z);
-    void **p = vmem_fetch(n);
-    ((void (*)(void *))*p)(p);
-  }));
+  DICT("execute", {
+    uint64_t n = mpz_get_ui(POPZ);
+    cpu_run((void *) vmem_fetch(n));
+  });
 
   void codeword_create(void **p) {
     mpz_set_ui(*stack_grow(dstack), (uintptr_t) p[1]);
@@ -530,44 +449,44 @@ int main(int argc, char **argv) {
     ip = p[2];
   }
 
-  add_dict("create", ANON({
+  DICT("create", {
     if (!get_word()) ABORT("empty name");
     curdef_new(0, 0);
     add_entry(word);
     compile(codeword_create);
     compile((void *) (here + 2));
     compile(0);
-  }));
+  });
 
-  add_dict_full("does>", ANON({
+  DICT_C("does>", {
     curdef->cell[0] = codeword_does;
     curdef->cell[2] = ip;
     ip = stack_pop(rstack);
-  }), 0, 1);
+  });
 
-  add_dict("allot", ANON({
+  DICT("allot", {
     mpz_ptr z = POPZ;
     uintptr_t n = mpz_get_ui(z);
     defn_grow_n(curdef, n);
     here += n;
-  }));
+  });
 
   // TODO: Switch to mpz for sufficiently large integers.
-  add_dict(",", ANON({
+  DICT(",", {
     mpz_ptr z = POPZ;
     intptr_t n = mpz_get_si(z);
     compile((void *) n);
-  }));
+  });
 
-  add_dict("@", ANON({
+  DICT("@", {
     mpz_ptr z = PEEPZ;
     uint64_t n = mpz_get_ui(z);
     void **p = vmem_fetch(n);
     if (!p) ABORT("bad address");
     mpz_set_si(z, (intptr_t) *p);
-  }));
+  });
 
-  add_dict("!", ANON({
+  DICT("!", {
     mpz_ptr addr = POPZ;
     uint64_t n = mpz_get_ui(addr);
     void **p = vmem_fetch(n);
@@ -575,24 +494,23 @@ int main(int argc, char **argv) {
     mpz_ptr x = POPZ;
     n = mpz_get_ui(x);
     *p = (void *) n;
-  }));
+  });
 
   uint64_t base_addr;
-  add_dict("base", ANON({ mpz_set_ui(*stack_grow(dstack), base_addr); }));
+  DICT("base", { mpz_set_ui(*stack_grow(dstack), base_addr); });
 
-  add_dict_full("(", get_until_rparen, 1, 0);
-
-  add_dict_full("\\", ANON({ get_until(0); }), 1, 0);
+  DICT_I("(", { get_until(')'); });
+  DICT_I("\\", { get_until(0); });
 
   void *run_print[] = {ANON({ fputs((const char *) *ip++, stdout); })};
 
-  add_dict_compile(".\"", ANON({
+  DICT_IC(".\"", {
     get_until_quote();
     compile(run_print);
     compile(strdup(word));
-  }));
+  });
 
-  add_dict_compile("s\"", ANON({
+  DICT_IC("s\"", {
     get_until_quote();
     uintptr_t len = strlen(word);
     compile(run_literal_ui);
@@ -604,11 +522,11 @@ int main(int argc, char **argv) {
     for (unsigned char *c = (unsigned char *) word; *c; c++) {
       compile((void *) (uintptr_t) *c);
     }
-  }));
+  });
 
   int bye = 0;
 
-  add_dict("bye", ANON({ bye = 1; }));
+  DICT("bye", { bye = 1; });
 
   // Disable readline for non-interactive sessions.
   char *(*liner)() = ({char*_() {
@@ -634,9 +552,8 @@ int main(int argc, char **argv) {
     ((void (*)(void *))*defn->cell)(defn->cell);
   })};
   void interpret_word() {
-    BLT_IT *it = blt_get(dict, word);
-    if (it) {
-      defn_ptr defn = it->data;
+    defn_ptr defn = find_defn(word);
+    if (defn) {
       if (state == 1) {
         if (defn->immediate) {
           cpu_run((void *) defn->cell);
