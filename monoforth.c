@@ -77,17 +77,15 @@ void toutf8(void (*f)(char), uint32_t x) {
 }
 
 struct stack_t {
-  int i, max, record;
+  int i, max, record, is_mpz;
   void **p;
-  int is_mpz;
 };
 typedef struct stack_t *stack_ptr;
 
 stack_ptr stack_new() {
   stack_ptr r = malloc(sizeof(*r));
-  r->record = r->i = 0, r->max = 8;
+  r->is_mpz = r->record = r->i = 0, r->max = 8;
   r->p = malloc(sizeof(*r->p) * r->max);
-  r->is_mpz = 0;
   return r;
 }
 
@@ -223,13 +221,11 @@ int main(int argc, char **argv) {
     curdef->compile_only = 1;
   });
   DICT_C("2rdrop", { ijstack->i -= 2; });
-  void *run_2rdrop = curdef->cell;
   DICT_C("(jmp)", { ip += (intptr_t) *ip; });
   DICT_C("(jz)", {
     mpz_ptr z = POPZ;
     ip += mpz_sgn(z) ? 1 : (intptr_t) *ip ;
   });
-  void *run_jz = curdef->cell;
 
   // More "standard" words.
   DICT("here", { mpz_set_ui(*stack_grow(dstack), here); });
@@ -238,60 +234,10 @@ int main(int argc, char **argv) {
   DICT_C("r>", { stack_push_mpz(dstack, stack_pop(ijstack)); });
   DICT_C("r@", { stack_push_mpz(dstack, stack_peep(ijstack)); });
   DICT_C("rclear", { stack_reset(rstack); });
+  DICT_C("j", { stack_push_mpz(dstack, ijstack->p[ijstack->i - 3]); });
 
   void (*refill)();
   DICT("refill", { refill(); });
-
-  void *run_loop_check[] = {ANON({
-    int i = ijstack->i;
-    mpz_ptr index = ijstack->p[i - 1];
-    mpz_ptr limit = ijstack->p[i - 2];
-    mpz_add_ui(index, index, 1);
-    mpz_set_si(*stack_grow(dstack), -!mpz_cmp(index, limit));
-  })};
-
-  void *run_ploop_check[] = {ANON({
-    int i = ijstack->i;
-    mpz_ptr index = ijstack->p[i - 1];
-    mpz_ptr limit = ijstack->p[i - 2];
-    mpz_ptr z = *stack_grow(dstack);
-    mpz_mul_ui(z, limit, 2);
-    mpz_sub_ui(z, z, 1);
-    mpz_ptr twice = *stack_grow(dstack);
-    mpz_mul_ui(twice, index, 2);
-    dstack->i -= 2;
-    mpz_ptr inc = PEEPZ;
-
-    int cont = mpz_cmp(twice, z);
-    mpz_add(index, index, inc);
-    mpz_mul_ui(twice, index, 2);
-    cont *= mpz_cmp(twice, z);
-    mpz_set_si(inc, cont < 0);
-  })};
-
-  DICT_IC("loop", {
-    compile(run_loop_check);
-    compile(run_jz);
-    intptr_t offset = mpz_get_ui(stack_pop(ijstack));
-    compile((void *) (offset - here));
-    compile(run_2rdrop);
-    while((offset = mpz_get_ui(stack_pop(ijstack)))) {
-      *vmem_fetch(offset) = (void *) (here - offset);
-    }
-  });
-
-  DICT_IC("+loop", {
-    compile(run_ploop_check);
-    compile(run_jz);
-    intptr_t offset = mpz_get_ui(stack_pop(ijstack));
-    compile((void *) (offset - here));
-    compile(run_2rdrop);
-    while((offset = mpz_get_ui(stack_pop(ijstack)))) {
-      *vmem_fetch(offset) = (void *) (here - offset);
-    }
-  });
-
-  DICT_C("j", { stack_push_mpz(dstack, ijstack->p[ijstack->i - 3]); });
 
   DICT("cr", { putchar('\n'); });
 
@@ -547,33 +493,31 @@ int main(int argc, char **argv) {
     return r;
   }_;});
 
-  void *run_defn[] = {ANON({
+  void *run_recurse[] = {ANON({
     defn_ptr defn = *ip++;
-    ((void (*)(void *))*defn->cell)(defn->cell);
+    cpu_run(defn->cell);
   })};
   void interpret_word() {
     defn_ptr defn = find_defn(word);
     if (defn) {
       if (state == 1) {
         if (defn->immediate) {
-          cpu_run((void *) defn->cell);
+          cpu_run(defn->cell);
         } else {
           if (defn == curdef) {  // Recursion. TODO: Detect tail calls.
-            compile(run_defn);
+            compile(run_recurse);
             compile(defn);
           } else {
             compile(defn->cell);
           }
         }
       } else {
-        if (defn->compile_only) ABORT("compile only"); else {
-          cpu_run((void *) defn->cell);
-        }
+        if (defn->compile_only) ABORT("compile only");
+        cpu_run(defn->cell);
       }
     } else {
       if (mpz_set_str(*stack_grow(dstack), word, get_base())) {
-        printf(" ['%s'] ", word);
-        ABORT("bad word");
+        printf(" ['%s'] ", word); ABORT("bad word");
       }
       if (state == 1) {
         mpz_ptr z = mpz_new();
@@ -673,7 +617,12 @@ int main(int argc, char **argv) {
 ": while postpone (jz) here 0 , swap ; immediate compile-only",
 ": repeat postpone (jmp) here - , dup here swap - swap ! ; immediate compile-only",
 ": do postpone 2>r 0 here 2>r ; immediate compile-only",
+": (loop-check) r> 1+ dup r@ = if drop r> drop -1 else >r 0 then ;",
+": (resolve-leaves) r> dup if 2dup dup -rot - swap ! (resolve-leaves) else 2drop then ; "
+": loop postpone (loop-check) postpone (jz) r> here - , here (resolve-leaves) ; immediate compile-only",
 ": leave postpone 2rdrop postpone (jmp) here r> 2>r 0 , ; immediate compile-only",
+": (+loop-check) r@ 2dup + 2* r> 2* r@ 2* 1- dup -rot - -rot - * 0< if 2drop r> drop -1 else + >r 0 then ;",
+": +loop postpone (+loop-check) postpone (jz) r> here - , here (resolve-leaves) ; immediate compile-only",
 ": i r@ ; compile-only",
 ": ?dup dup if dup then ;",
 ": cell+ 1+ ;",
@@ -689,7 +638,6 @@ int main(int argc, char **argv) {
 ": decimal 10 base ! ;",
 ": hex 16 base ! ;",
 ": quit rclear refill if interpret state space if .\" compile\" else .\" ok\" then cr quit then bye ;",
-
 ": value constant ;",
 ": to ' 3 + state if postpone literal postpone ! else ! then ; immediate",  // Specific to our implementation of CREATE.
 ": erase dup if 1- swap 0 over ! 1+ swap erase else 2drop then ;",
