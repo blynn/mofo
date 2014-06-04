@@ -11,7 +11,7 @@
 
 #define ANON(_body_) ({void _()_body_ _;})
 
-#define ABORT(_msg_) ({ puts(_msg_); stack_reset(dstack); ip = quit_loop_hack; return; })
+#define ABORT(_msg_) ({ puts(_msg_); stack_reset(dstack); cpu_run((void *) find_xt("quit")); return; })
 
 #define POPZ ({ if (stack_empty(dstack)) ABORT("stack underflow"); stack_pop(dstack); })
 
@@ -120,8 +120,7 @@ void stack_push_mpz(stack_ptr st, mpz_ptr v) {
   mpz_set(*stack_grow(st), v);
 }
 
-int main() {
-  void **quit_loop_hack;
+int main(int argc, char **argv) {
   BLT *dict = blt_new();
   stack_ptr dstack = stack_new_mpz();
   stack_ptr ijstack = stack_new_mpz();
@@ -151,6 +150,8 @@ int main() {
 
   void *run_exit[] = {ANON({ ip = stack_pop(rstack); })};
 
+  void cpu_run(void (**p)(void *)) { (*p)(p); }
+
   defn_ptr curdef = 0;
   uint64_t here = 0;
   BLT *vmem = blt_new();
@@ -177,16 +178,32 @@ int main() {
     curdef->vloc = here;
   }
 
+  defn_ptr find_defn(char *word) {
+    BLT_IT *it = blt_get(dict, word);
+    return it ? it->data : 0;
+  }
+
+  void *find_xt(char *word) {
+    defn_ptr defn = find_defn(word);
+    return defn ? defn->cell : 0;
+  }
+
+  int add_upper = 1;
+  void add_entry(char *word) {
+    blt_put(dict, word, curdef);
+    if (add_upper) {
+      char *upper = strdup(word);
+      for (char *c = upper; *c; c++) *c = toupper(*c);
+      blt_put(dict, upper, curdef);
+      free(upper);
+    }
+  }
+
   void add_dict_full(char *word, void (*fun)(),
       char immediate, char compile_only) {
     curdef_new(immediate, compile_only);
     compile(fun);
-    blt_put(dict, word, curdef);
-
-    char *upper = strdup(word);
-    for (char *c = upper; *c; c++) *c = toupper(*c);
-    if (strcmp(upper, word)) blt_put(dict, upper, curdef);
-    free(upper);
+    add_entry(word);
   }
 
   void add_dict(char *word, void (*fun)()) {
@@ -222,6 +239,11 @@ int main() {
   add_dict_full("r@", ANON({
     stack_push_mpz(dstack, stack_peep(ijstack));
   }), 0, 1);
+
+  add_dict_full("rclear", ANON({ stack_reset(rstack); }), 0, 1);
+
+  void (*refill)();
+  add_dict("refill", ANON({ refill(); }));
 
   void *run_loop_check[] = {ANON({
     int i = ijstack->i;
@@ -395,7 +417,7 @@ int main() {
   add_dict(":", ANON({
     if (!get_word()) ABORT("empty name");
     curdef_new(0, 0);
-    blt_put(dict, word, curdef);
+    add_entry(word);
     state = 1;
     compile(codeword_colon);
   }));
@@ -469,7 +491,7 @@ int main() {
   add_dict("create", ANON({
     if (!get_word()) ABORT("empty name");
     curdef_new(0, 0);
-    blt_put(dict, word, curdef);
+    add_entry(word);
     compile(codeword_create);
     compile((void *) (here + 2));
     compile(0);
@@ -527,14 +549,6 @@ int main() {
 
   add_dict("bye", ANON({ bye = 1; }));
 
-  void *run_bye = curdef->cell;
-
-  void cpu_loop() { while (!bye) {
-    void **cell = *ip++;
-    void (*fun)(void *) = *cell;
-    fun(cell);
-  } }
-
   // Disable readline for non-interactive sessions.
   char *(*liner)() = ({char*_() {
     char *r = readline("");
@@ -554,13 +568,6 @@ int main() {
     return r;
   }_;});
 
-  char *tib = 0;
-  void accept_input() {
-    free(tib);
-    cursor = tib = liner();
-    mpz_set_si(*stack_grow(dstack), -!!tib);
-  }
-
   void *run_defn[] = {ANON({
     defn_ptr defn = *ip++;
     ((void (*)(void *))*defn->cell)(defn->cell);
@@ -571,9 +578,9 @@ int main() {
       defn_ptr defn = it->data;
       if (state == 1) {
         if (defn->immediate) {
-          ((void (*)(void *))*defn->cell)(defn->cell);
+          cpu_run((void *) defn->cell);
         } else {
-          if (defn == curdef) {
+          if (defn == curdef) {  // Recursion. TODO: Detect tail calls.
             compile(run_defn);
             compile(defn);
           } else {
@@ -582,7 +589,7 @@ int main() {
         }
       } else {
         if (defn->compile_only) ABORT("compile only"); else {
-          ((void (*)(void *))*defn->cell)(defn->cell);
+          cpu_run((void *) defn->cell);
         }
       }
     } else {
@@ -604,6 +611,7 @@ int main() {
   base = vmem_fetch(base_addr);
 
   curdef_new(0, 0);
+  add_entry("interpret");
   compile(codeword_colon);
   compile((void*[]){ANON({ mpz_set_si(*stack_grow(dstack), -!!get_word()); })});
   compile(run_jz);
@@ -612,84 +620,113 @@ int main() {
   compile(run_jmp);
   compile((void *) -5);
   compile(run_exit);
-  void *run_interpret = curdef->cell;
 
-  void *hack[] = { run_interpret, run_bye };
-  void go(char *line) {
-    cursor = line;
-    ip = hack;
-    cpu_loop();
+  void *init_program[] = {
+    find_xt("refill"),
+    run_jz,
+    (void *) 4,
+    find_xt("interpret"),
+    run_jmp,
+    (void *) -5,
+    0,  // Should be "quit", but this is defined by a preset.
+  };
+  ip = init_program;
+
+  char *tib = 0;
+  void refill_terminal() {
+    free(tib);
+    cursor = tib = liner();
+    mpz_set_si(*stack_grow(dstack), -!!tib);
+  }
+
+  void refill_files() {
+    static int i = 1;
+    static FILE *fp = 0;
+    for (;;) {
+      if (i == argc) {
+        refill = refill_terminal;
+        mpz_set_si(*stack_grow(dstack), 0);
+        return;
+      }
+      if (!fp) {
+        fp = fopen(argv[i], "rb");
+        if (!fp) fprintf(stderr, "error opening '%s'\n", argv[i]), exit(1);
+      }
+      free(tib);
+      tib = 0;
+      size_t n;
+      if (-1 == getline(&tib, &n, fp)) {
+        if (!feof(fp)) fprintf(stderr, "read error: '%s'\n", argv[i]), exit(1);
+        fclose(fp);
+        fp = 0;
+        i++;
+      } else break;
+    }
+    char *c = tib + strlen(tib) - 1;
+    if (*c == '\n') *c = 0;
+    cursor = tib;
+    mpz_set_si(*stack_grow(dstack), -1);
   }
 
   // Load presets.
-  for(char **p = (char *[]){
-    ": ? @ . ;",
-    ": 1- 1 - ;",
-    ": 1+ 1 + ;",
-    ": 2* 2 * ;",
-    ": 2/ 2 / ;",
-    ": 0> 0 > ;",
-    ": 0= 0 = ;",
-    ": 0< 0 < ;",
-    ": 0<> 0 <> ;",
-    ": */ >r * r> / ;",
-    ": 2>r swap >r >r ;",
-    ": 2dup over over ;",
-    ": 2drop drop drop ;",
-    ": if postpone (jz) here 0 , ; immediate compile-only",
-    ": else postpone (jmp) here 0 , over dup here swap - swap ! ; immediate compile-only",
-    ": then dup here swap - swap ! ; immediate compile-only",
-    ": begin here ; immediate compile-only",
-    ": again postpone (jmp) here - , ; immediate compile-only",
-    ": until (jz) here - , ; immediate compile-only",
-    ": while postpone (jz) here 0 , swap ; immediate compile-only",
-    ": repeat postpone (jmp) here - , dup here swap - swap ! ; immediate compile-only",
-    ": do postpone 2>r 0 here 2>r ; immediate compile-only",
-    ": leave postpone 2rdrop postpone (jmp) here r> 2>r 0 , ; immediate compile-only",
-    ": i r@ ; compile-only",
-    ": ?dup dup if dup then ;",
-    ": cell+ 1+ ;",
-    ": cells 1 * ;",
-    ": space 32 emit ;",
-    ": spaces dup 0> if 0 do space loop then ;",
-    ": constant create , does> @ ;",
-    ": variable create 0 , ;",
-    ": type 0 do dup @ emit 1+ loop ;",
-    "32 constant bl",
-    "-1 constant true",
-    "0 constant false",
-    ": decimal 10 base ! ;",
-    ": hex 16 base ! ;",
-     0,
-  }; *p; p++) {
-    char *s = strdup(*p);
-    go(s);
-    bye = 0;
-    char *upper = strdup(*p);
-    for (char *c = upper; *c; c++) *c = toupper(*c);
-    if (strcmp(upper, *p)) go(upper);
-    bye = 0;
-    free(upper);
-    free(s);
+  void refill_presets() {
+    static char *preset[] = {
+": ? @ . ;",
+": 1- 1 - ;",
+": 1+ 1 + ;",
+": 2* 2 * ;",
+": 2/ 2 / ;",
+": 0> 0 > ;",
+": 0= 0 = ;",
+": 0< 0 < ;",
+": 0<> 0 <> ;",
+": */ >r * r> / ;",
+": 2>r swap >r >r ;",
+": 2dup over over ;",
+": 2drop drop drop ;",
+": if postpone (jz) here 0 , ; immediate compile-only",
+": else postpone (jmp) here 0 , swap dup here swap - swap ! ; immediate compile-only",
+": then dup here swap - swap ! ; immediate compile-only",
+": begin here ; immediate compile-only",
+": again postpone (jmp) here - , ; immediate compile-only",
+": until (jz) here - , ; immediate compile-only",
+": while postpone (jz) here 0 , swap ; immediate compile-only",
+": repeat postpone (jmp) here - , dup here swap - swap ! ; immediate compile-only",
+": do postpone 2>r 0 here 2>r ; immediate compile-only",
+": leave postpone 2rdrop postpone (jmp) here r> 2>r 0 , ; immediate compile-only",
+": i r@ ; compile-only",
+": ?dup dup if dup then ;",
+": cell+ 1+ ;",
+": cells 1 * ;",
+": space 32 emit ;",
+": spaces dup 0> if 0 do space loop then ;",
+": constant create , does> @ ;",
+": variable create 0 , ;",
+": type 0 do dup @ emit 1+ loop ;",
+"32 constant bl",
+"-1 constant true",
+"0 constant false",
+": decimal 10 base ! ;",
+": hex 16 base ! ;",
+": quit rclear refill if interpret state space if .\" compile\" else .\" ok\" then cr quit then bye ;",
+    0 };
+    static char **p = preset;
+    if (!*p) {
+      init_program[6] = find_xt("quit");
+      add_upper = 0;
+      refill = refill_files;
+      refill();
+      return;
+    }
+    free(tib);
+    cursor = tib = strdup(*p++);
+    mpz_set_si(*stack_grow(dstack), -1);
   }
+  refill = refill_presets;
 
-  // Quit loop.
-  void *quit_loop[] = {
-    (void *[]){ ANON({ stack_reset(rstack); }) },
-    (void *[]){ accept_input },
-    run_jz,
-    (void *) 5,
-    run_interpret,
-    (void *[]){ ANON({ puts(state == 1 ? " compile" : " ok"); }) },
-    run_jmp,
-    (void *) -7,
-    run_bye,
-  };
-  quit_loop_hack = quit_loop;
-  ip = quit_loop;
   curdef_new(0, 0);
   sentinel_def = curdef;
-  cpu_loop();
+  while (!bye) cpu_run(*ip++);
 
   // Clean up. TODO: Lots!
   free(tib);

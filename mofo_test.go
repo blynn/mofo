@@ -1,6 +1,8 @@
 package mofo
 
 import (
+  "io/ioutil"
+  "os"
   "os/exec"
   "strings"
   "testing"
@@ -84,4 +86,117 @@ func TestBeginAgain(t *testing.T) {
   // Implicitly tests Chapter 11 of Brodie, because we define:
   //   : begin here ; immediate
   oneliner(t, ": foo begin 1+ dup . dup 50 = if exit then again ; 47 foo", "48 49 50 ")
+}
+
+func filer(t *testing.T, in, want string) {
+  f, err := ioutil.TempFile("", "test")
+  if err != nil {
+    t.Fatal("TempFile:", err);
+  }
+  f.Close()
+  err = ioutil.WriteFile(f.Name(), []byte(in), 0777)
+  if err != nil {
+    t.Fatal("WriteFile:", err);
+  }
+  defer os.Remove(f.Name())
+
+  c := exec.Command("./mofo", f.Name())
+  c.Stdin = strings.NewReader(in)
+  b, err := c.CombinedOutput()
+  if err != nil {
+    t.Fatal("input:", in, "runtime error:", err)
+  }
+  s := string(b)
+  if s != want {
+    t.Error("input:", in, "\nwant:", want, "got:", s);
+  }
+}
+
+// Also from "Starting Forth" by Leo Brodie.
+func TestChapter5LongerExample(t *testing.T) {
+  filer(t,
+`  : R%  10 */  5 +  10 / ;
+   : DOUBLED
+     6 1000 21 1 DO  CR ." YEAR " I 2 U.R
+           2DUP R% +  DUP ."    BALANCE " .
+           DUP 2000 > IF  CR CR ." more than doubled in "
+                             I . ." years " LEAVE
+                    THEN
+      LOOP 2DROP ;
+   DOUBLED
+   bye`,
+`
+YEAR  1   BALANCE 1060 
+YEAR  2   BALANCE 1124 
+YEAR  3   BALANCE 1191 
+YEAR  4   BALANCE 1262 
+YEAR  5   BALANCE 1338 
+YEAR  6   BALANCE 1418 
+YEAR  7   BALANCE 1503 
+YEAR  8   BALANCE 1593 
+YEAR  9   BALANCE 1689 
+YEAR 10   BALANCE 1790 
+YEAR 11   BALANCE 1897 
+YEAR 12   BALANCE 2011 
+
+more than doubled in 12 years `)
+}
+
+// http://en.literateprograms.org/Fixed-point_arithmetic_(Forth)
+func TestMandelbrot(t *testing.T) {
+  filer(t,
+`hex
+ 4000 constant 1fixed
+ 4666 constant 1.1fixed
+10000 constant 4fixed
+decimal
+1fixed  3 * 80 / constant xinc
+1.1fixed 2* 24 / constant yinc
+
+: *f ( f g -- f*g ) 1fixed */ ;
+: sq ( f -- f f*f ) over dup *f ;
+: mandel
+  1.1fixed dup negate do
+    1fixed dup 2* negate do
+      i j 30                 ( initial point x,y and max iteration count )
+      begin  1- ?dup
+      while  -rot sq sq
+             2dup + 4fixed <
+      while  - i +
+             -rot *f 2* j + rot
+      repeat 2drop drop          \ exit from second while
+             space
+      else   ." *"               \ exit from first while
+      then 2drop
+    xinc +loop
+    cr
+  yinc +loop ;
+mandel bye
+`,
+`                                                                                 
+                                                                                 
+                                                                                 
+                                               * ****                            
+                                                ******                           
+                                           **  ******* * *     *                 
+                                       ************************                  
+                                     *************************                   
+                                    ***************************                  
+                       *   * *    ******************************                 
+                      *********** ******************************                 
+                     *******************************************                 
+      *   *   ***********************************************                    
+                    ********************************************                 
+                      *********** ******************************                 
+                       *   * *    ******************************                 
+                                    ***************************                  
+                                     *************************                   
+                                       ************************                  
+                                            *  ******* ***     *                 
+                                                *****                            
+                                                *****                            
+                                                                                 
+                                                                                 
+                                                                                 
+`)
 }
