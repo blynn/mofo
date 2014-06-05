@@ -88,6 +88,11 @@ func TestBeginAgain(t *testing.T) {
   oneliner(t, ": foo begin 1+ dup . dup 50 = if exit then again ; 47 foo", "48 49 50 ")
 }
 
+func TestUTF8(t *testing.T) {
+  oneliner(t, "hex 5e8a emit 524d emit 660e emit 6708 emit 5149 emit", "床前明月光")
+  oneliner(t, "hex char 床 . char 前 . char 明 . char 月 . char 光 .", "5e8a 524d 660e 6708 5149 ")
+}
+
 func filer(t *testing.T, in, want string) {
   f, err := ioutil.TempFile("", "test")
   if err != nil {
@@ -140,6 +145,63 @@ YEAR 11   BALANCE 1897
 YEAR 12   BALANCE 2011 
 
 more than doubled in 12 years `)
+}
+
+func TestChapter9LongerExample(t *testing.T) {
+  filer(t, `
+    ( 1 ) : HELLO    ." Hello " ;
+    ( 2 ) : GOODBYE  ." Goodbye " ;
+    ( 3 ) VARIABLE 'aloha  ' HELLO 'aloha !
+    ( 4 ) : ALOHA    'aloha @ EXECUTE ;
+    ALOHA
+    ' GOODBYE 'aloha !
+    ALOHA
+    : SAY ' 'aloha ! ;
+    SAY HELLO
+    ALOHA
+    SAY GOODBYE
+    ALOHA
+    : COMING ['] HELLO   'aloha ! ;
+    : GOING  ['] GOODBYE 'aloha ! ;
+    COMING
+    ALOHA
+    GOING
+    ALOHA
+    bye
+`, `Hello Goodbye Hello Goodbye Hello Goodbye `)
+}
+
+func TestChapter11LongerExample(t *testing.T) {
+  filer(t, `\ Shapes, using a defining word.
+
+DECIMAL
+
+: star  [CHAR] * EMIT ;
+
+: .row  CR 8 0 DO
+   DUP 128 AND IF  star
+     ELSE  SPACE
+     THEN
+   1 LSHIFT
+     LOOP  DROP ;
+
+: SHAPE CREATE  8 0 DO  C,  LOOP
+  DOES> DUP 7 + DO  I C@ .row  -1 +LOOP  CR ;
+
+  HEX  18 18 3C 5A 99 24 24 24  SHAPE man
+  81 42 24 18 18 24 24 81  SHAPE equis
+  AA AA FE FE 38 38 38 FE  SHAPE castle
+  DECIMAL
+  man bye`, `
+   **   
+   **   
+  ****  
+ * ** * 
+*  **  *
+  *  *  
+  *  *  
+  *  *  
+`)
 }
 
 // http://en.literateprograms.org/Fixed-point_arithmetic_(Forth)

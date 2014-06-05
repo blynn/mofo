@@ -54,28 +54,6 @@ void mpz_free(mpz_ptr p) {
   free(p);
 }
 
-void toutf8(void (*f)(char), uint32_t x) {
-  if (x < 0x80) {
-    f(x);
-    return;
-  }
-  if (x < 0x800) {
-    f((x>>6) | 0xC0), f((x & 0x3F) | 0x80);
-    return;
-  }
-  if (x < 0x10000) {
-    f((x>>12) | 0xE0), f(((x>>6) & 0x3F) | 0x80), f((x & 0x3F) | 0x80);
-    return;
-  }
-  if (x < 0x110000) {
-    f((x>>18) | 0xF0);
-    f(((x>>12) & 0x3F) | 0x80);
-    f(((x>>6) & 0x3F) | 0x80);
-    f((x & 0x3F) | 0x80);
-    return;
-  }
-}
-
 struct stack_t {
   int i, max, record, is_mpz;
   void **p;
@@ -212,20 +190,17 @@ int main(int argc, char **argv) {
     defn_ptr defn = find_defn(word); \
     if (!defn) ABORT("name not found"); defn; })
 
-  // Seed enough words to define other core words.
-
   // Words I named.
   DICT("usleep", { mpz_ptr z = PEEPZ; usleep(mpz_get_ui(z)); });
+  // PUTC behaves as the standard EMIT, while our EMIT supports UTF-8.
+  DICT("putc", { putchar(mpz_get_si(POPZ)); });
   DICT("compile-only", {
     if (curdef == sentinel_def) ABORT("no definition");
     curdef->compile_only = 1;
   });
   DICT_C("2rdrop", { ijstack->i -= 2; });
   DICT_C("(jmp)", { ip += (intptr_t) *ip; });
-  DICT_C("(jz)", {
-    mpz_ptr z = POPZ;
-    ip += mpz_sgn(z) ? 1 : (intptr_t) *ip ;
-  });
+  DICT_C("(jz)", { mpz_ptr z = POPZ; ip += mpz_sgn(z) ? 1 : (intptr_t) *ip ; });
 
   // More "standard" words.
   DICT("here", { mpz_set_ui(*stack_grow(dstack), here); });
@@ -240,14 +215,6 @@ int main(int argc, char **argv) {
   DICT("refill", { refill(); });
 
   DICT("cr", { putchar('\n'); });
-
-  DICT("emit", {
-    mpz_ptr z = *stack_grow(dstack);
-    dstack->i--;
-    mpz_set_ui(z, 0xffffffff);
-    mpz_and(z, z, POPZ);
-    toutf8((void (*)(char)) putchar, mpz_get_ui(z));
-  });
 
   void **base;
   int get_base() {
@@ -279,17 +246,26 @@ int main(int argc, char **argv) {
     }
   });
 
+  uintptr_t decode_utf8(char *s) {
+    uintptr_t count = 0, r = (unsigned char) *s;
+    for (int b = 128; r & b; b >>= 1) r &= ~b, count++;
+    if (!count) return r;
+    while (--count) {
+      if (!(*++s & 0x80)) return r;  // Bad UTF-8.
+      r = (r << 6) + (*s & 0x3f);
+    }
+    return r;
+  }
+
   DICT("char", {
     if (!get_word()) ABORT("empty word");
-    // TODO: Decode UTF-8.
-    mpz_set_ui(*stack_grow(dstack), word[0]);
+    mpz_set_ui(*stack_grow(dstack), decode_utf8(word));
   });
 
   DICT_IC("[char]", {
     if (!get_word()) ABORT("empty word");
-    // TODO: Decode UTF-8.
     compile(run_literal_ui);
-    compile((void *) (uintptr_t) word[0]);
+    compile((void *) decode_utf8(word));
   });
 
 #define DICT_STACK(_word_,_n_,_fun_) DICT(_word_, { \
@@ -325,6 +301,7 @@ int main(int argc, char **argv) {
   DICT_MPZ("min", { mpz_set(z, mpz_cmp(z, x) < 0 ? z : x); });
   DICT_MPZ("max", { mpz_set(z, mpz_cmp(z, x) > 0 ? z : x); });
   DICT_MPZ("lshift", { mpz_mul_2exp(z, z, mpz_get_ui(x)); });
+  DICT_MPZ("rshift", { mpz_fdiv_q_2exp(z, z, mpz_get_ui(x)); });
 
   DICT("invert", { mpz_ptr z = PEEPZ; mpz_com(z, z); });
   DICT("negate", { mpz_ptr z = PEEPZ; mpz_neg(z, z); });
@@ -474,12 +451,12 @@ int main(int argc, char **argv) {
 
   DICT("bye", { bye = 1; });
 
-  // Disable readline for non-interactive sessions.
   char *(*liner)() = ({char*_() {
     char *r = readline("");
     if (r && *r) add_history(r);
     return r;
   }_;});
+  // Disable readline for non-interactive sessions.
   if (!isatty(STDIN_FILENO)) liner = ({char*_(){
     char *r = 0;
     size_t n;
@@ -504,7 +481,7 @@ int main(int argc, char **argv) {
         if (defn->immediate) {
           cpu_run(defn->cell);
         } else {
-          if (defn == curdef) {  // Recursion. TODO: Detect tail calls.
+          if (defn == curdef) {  // Recursion.
             compile(run_recurse);
             compile(defn);
           } else {
@@ -627,23 +604,34 @@ int main(int argc, char **argv) {
 ": ?dup dup if dup then ;",
 ": cell+ 1+ ;",
 ": cells 1 * ;",
-": space 32 emit ;",
-": spaces dup 0> if 0 do space loop then ;",
 ": constant create , does> @ ;",
 ": variable create 0 , ;",
+": decimal 10 base ! ;",
+": hex 16 base ! ;",
+"hex "
+": u6b 6 * rshift 3f and 80 or putc ; "
+": emit "
+"  dup     80 < if putc else "
+"  dup    800 < if dup 1 6 * rshift 0c0 or putc     0 u6b                 else "
+"  dup  10000 < if dup 2 6 * rshift 0e0 or putc dup 1 u6b     0 u6b       else "
+"  dup 110000 < if dup 3 6 * rshift 0f0 or putc dup 2 u6b dup 1 u6b 0 u6b "
+"  then then then then ; "
+"decimal ",
 ": type 0 do dup @ emit 1+ loop ;",
+": space 32 emit ;",
+": spaces dup 0> if 0 do space loop then ;",
 "32 constant bl",
 "-1 constant true",
 "0 constant false",
-": decimal 10 base ! ;",
-": hex 16 base ! ;",
 ": quit rclear refill if interpret state space if .\" compile\" else .\" ok\" then cr quit then bye ;",
 ": value constant ;",
-": to ' 3 + state if postpone literal postpone ! else ! then ; immediate",  // Specific to our implementation of CREATE.
+": to ' 3 + state if postpone literal postpone ! else ! then ; immediate",
 ": erase dup if 1- swap 0 over ! 1+ swap erase else 2drop then ;",
 ": c@ @ ;",
 ": c! ! ;",
+": c, , ;",
 ": u.r .r ;",
+": u. . ;",
     0 };
     static char **p = preset;
     if (!*p) {
