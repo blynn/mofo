@@ -21,6 +21,7 @@ struct defn_s {
   char immediate, compile_only;
   void **cell;
   uint64_t n, vloc;
+  BLT_IT *it;
 };
 typedef struct defn_s *defn_ptr;
 
@@ -30,6 +31,7 @@ defn_ptr defn_new(char immediate, char compile_only) {
   r->immediate = immediate;
   r->vloc = r->n = 0;
   r->cell = 0;
+  r->it = 0;
   return r;
 }
 
@@ -101,6 +103,7 @@ int main(int argc, char **argv) {
   BLT *dict = blt_new();
   stack_ptr dstack = stack_new_mpz();
   stack_ptr ijstack = stack_new_mpz();
+  stack_ptr ostack = stack_new_mpz();
   stack_ptr rstack = stack_new();
   int state = 0;
   char *word = 0, *cursor = 0;
@@ -137,7 +140,8 @@ int main(int argc, char **argv) {
     sprintf(key, "%016lx", here);
     blt_put(vmem, key, p);
   }
-  void **vmem_fetch(int64_t n) {
+  void **vmem_fetch(mpz_ptr z) {
+    uint64_t n = mpz_get_ui(z);
     char key[17];
     sprintf(key, "%016lx", n);
     BLT_IT *it = blt_floor(vmem, key);
@@ -167,7 +171,7 @@ int main(int argc, char **argv) {
 
   int add_upper = 1;
   void add_entry(char *word) {
-    blt_put(dict, word, curdef);
+    curdef->it = blt_put(dict, word, curdef);
     if (add_upper) {
       char *upper = strdup(word);
       for (char *c = upper; *c; c++) *c = toupper(*c);
@@ -191,7 +195,7 @@ int main(int argc, char **argv) {
     if (!defn) ABORT("name not found"); defn; })
 
   // Words I named.
-  DICT("usleep", { mpz_ptr z = PEEPZ; usleep(mpz_get_ui(z)); });
+  DICT("usleep", { mpz_ptr z = POPZ; usleep(mpz_get_ui(z)); });
   // PUTC behaves as the standard EMIT, while our EMIT supports UTF-8.
   DICT("putc", { putchar(mpz_get_si(POPZ)); });
   DICT("compile-only", {
@@ -278,8 +282,15 @@ int main(int argc, char **argv) {
   DICT_STACK("2swap", 4, { swap(p, p-2); swap(p-1, p-3); });
   DICT_STACK(  "nip", 2, { swap(p, p-1); dstack->i--; });
   DICT_STACK( "over", 2, { mpz_set(*stack_grow(dstack), *(p-1)); });
+  DICT_STACK("2over", 4, { mpz_set(*stack_grow(dstack), *(p-3));
+                           mpz_set(*stack_grow(dstack), *(p-2)); });
   DICT_STACK(  "rot", 3, { swap(p, p-2); swap(p-1, p-2); });
   DICT_STACK( "-rot", 3, { swap(p-1, p-2); swap(p, p-2); });
+  DICT("pick", {
+    unsigned int n = mpz_get_ui(POPZ);
+    if (dstack->i <= n) ABORT("stack underflow");
+    mpz_set(*stack_grow(dstack), dstack->p[dstack->i - 1  - n]);
+  });
 
 #define DICT_MPZ_DIRECT(_op_, _mpz_fun_) DICT(_op_, { \
     mpz_ptr x = POPZ; mpz_ptr z = PEEPZ; _mpz_fun_(z, z, x); });
@@ -323,9 +334,34 @@ int main(int argc, char **argv) {
     compile(codeword_colon);
   });
 
-  void *run_exit[] = {ANON({ ip = stack_pop(rstack); })};
-  DICT_IC("exit", { compile(run_exit); });
-  DICT_IC(";", { compile(run_exit); state = 0; });
+  DICT_C("exit", { ip = stack_pop(rstack); });
+
+  DICT_IC(";", {
+    compile(find_xt("exit"));
+    state = 0;
+    while (!stack_empty(ostack)) {  // Optimize tail recursion.
+      void **p = vmem_fetch(stack_pop(ostack));
+      void **trace = p + 2; 
+      while (*trace == find_xt("(jmp)")) {  // Trace unconditional jumps.
+        trace++;
+        trace += (intptr_t) *trace;
+      }
+      if (*trace == find_xt("exit") || *trace == find_xt("bye")) {
+        *p++ = find_xt("(jmp)");  // Jump to just after the colon codeword.
+        *p = (void *) ((curdef->cell - p) + 1);
+      }
+    }
+  });
+
+  void *run_recurse[] = {ANON({
+    defn_ptr defn = *ip++;
+    cpu_run(defn->cell);
+  })};
+  DICT_IC("recurse", {
+    mpz_set_ui(*stack_grow(ostack), here);
+    compile(run_recurse);
+    compile(curdef);
+  });
 
   DICT_IC("literal", {
     compile(run_literal);
@@ -357,10 +393,7 @@ int main(int argc, char **argv) {
     compile((void *) FIND_DEFN->vloc);
   });
 
-  DICT("execute", {
-    uint64_t n = mpz_get_ui(POPZ);
-    cpu_run((void *) vmem_fetch(n));
-  });
+  DICT("execute", { cpu_run((void *) vmem_fetch(POPZ)); });
 
   void codeword_create(void **p) {
     mpz_set_ui(*stack_grow(dstack), (uintptr_t) p[1]);
@@ -390,7 +423,15 @@ int main(int argc, char **argv) {
   DICT("allot", {
     mpz_ptr z = POPZ;
     uintptr_t n = mpz_get_ui(z);
-    defn_grow_n(curdef, n);
+    {
+      // This hack prevents a crash if curdef is still equal to the definition
+      // containing this ALLOC, because the ip pointer may be invalidated by a
+      // realloc(). A similar problem exists with the comma operator.
+      uint64_t hack = ip - curdef->cell;
+      int use_hack = ip >= curdef->cell && hack < curdef->n;
+      defn_grow_n(curdef, n);
+      if (use_hack) ip = curdef->cell + hack;
+    }
     here += n;
   });
 
@@ -403,24 +444,20 @@ int main(int argc, char **argv) {
 
   DICT("@", {
     mpz_ptr z = PEEPZ;
-    uint64_t n = mpz_get_ui(z);
-    void **p = vmem_fetch(n);
+    void **p = vmem_fetch(z);
     if (!p) ABORT("bad address");
     mpz_set_si(z, (intptr_t) *p);
   });
 
   DICT("!", {
     mpz_ptr addr = POPZ;
-    uint64_t n = mpz_get_ui(addr);
-    void **p = vmem_fetch(n);
+    void **p = vmem_fetch(addr);
     if (!p) ABORT("bad address");
-    mpz_ptr x = POPZ;
-    n = mpz_get_ui(x);
-    *p = (void *) n;
+    *p = (void *) mpz_get_ui(POPZ);
   });
 
-  uint64_t base_addr;
-  DICT("base", { mpz_set_ui(*stack_grow(dstack), base_addr); });
+  mpz_t base_addr;
+  DICT("base", { stack_push_mpz(dstack, base_addr); });
 
   DICT_I("(", { get_until(')'); });
   DICT_I("\\", { get_until(0); });
@@ -470,10 +507,6 @@ int main(int argc, char **argv) {
     return r;
   }_;});
 
-  void *run_recurse[] = {ANON({
-    defn_ptr defn = *ip++;
-    cpu_run(defn->cell);
-  })};
   void interpret_word() {
     defn_ptr defn = find_defn(word);
     if (defn) {
@@ -482,6 +515,7 @@ int main(int argc, char **argv) {
           cpu_run(defn->cell);
         } else {
           if (defn == curdef) {  // Recursion.
+            mpz_set_ui(*stack_grow(ostack), here);
             compile(run_recurse);
             compile(defn);
           } else {
@@ -494,7 +528,7 @@ int main(int argc, char **argv) {
       }
     } else {
       if (mpz_set_str(*stack_grow(dstack), word, get_base())) {
-        printf(" ['%s'] ", word); ABORT("bad word");
+        printf("'%s':", word); ABORT("bad word");
       }
       if (state == 1) {
         mpz_ptr z = mpz_new();
@@ -506,7 +540,7 @@ int main(int argc, char **argv) {
   }
 
   curdef_new(0, 0);
-  base_addr = here;
+  mpz_init_set_ui(base_addr, here);
   compile((void *) 10);
   base = vmem_fetch(base_addr);
 
@@ -519,7 +553,7 @@ int main(int argc, char **argv) {
   compile((void*[]){interpret_word});
   compile(find_xt("(jmp)"));
   compile((void *) -5);
-  compile(run_exit);
+  compile(find_xt("exit"));
 
   void *init_program[] = {
     find_xt("refill"),
@@ -580,9 +614,11 @@ int main(int argc, char **argv) {
 ": 0< 0 < ;",
 ": 0<> 0 <> ;",
 ": */ >r * r> / ;",
-": 2>r swap >r >r ;",
 ": 2dup over over ;",
 ": 2drop drop drop ;",
+": 2>r swap >r >r ;",
+": 2r> r> r> swap ;",
+": 2r@ r> r> 2dup >r >r swap ;",
 ": ? @ . ;",
 ": +! dup @ rot + swap ! ;",
 ": if postpone (jz) here 0 , ; immediate compile-only",
@@ -656,5 +692,6 @@ int main(int argc, char **argv) {
   stack_free(dstack);
   stack_free(ijstack);
   stack_free(rstack);
+  stack_free(ostack);
   return 0;
 }

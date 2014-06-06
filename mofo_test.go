@@ -72,16 +72,6 @@ func TestStartingForthExamples(t *testing.T) {
   }
 }
 
-func TestRecursion(t *testing.T) {
-  for _, v := range []struct { in, out string }{
-    { ": fact dup 1 > if dup 1 - fact * then ; 10 fact .", "3628800 " },
-    { ": choose dup if over 1- over 1- choose rot * swap / else drop drop 1 then ; 100 50 choose .",
-       "100891344545564193334812497256 " },
-  } {
-    oneliner(t, v.in, v.out)
-  }
-}
-
 func TestBeginAgain(t *testing.T) {
   // Implicitly tests Chapter 11 of Brodie, because we define:
   //   : begin here ; immediate
@@ -106,7 +96,7 @@ func filer(t *testing.T, in, want string) {
   defer os.Remove(f.Name())
 
   c := exec.Command("./mofo", f.Name())
-  c.Stdin = strings.NewReader(in)
+  c.Stdin = strings.NewReader("bye\n")
   b, err := c.CombinedOutput()
   if err != nil {
     t.Fatal("input:", in, "runtime error:", err)
@@ -115,6 +105,18 @@ func filer(t *testing.T, in, want string) {
   if s != want {
     t.Error("input:", in, "\nwant:", want, "got:", s);
   }
+}
+
+func TestRecursion(t *testing.T) {
+  filer(t, `
+: factorial dup 1 > if dup 1 - factorial * then ;
+10 factorial .
+: *factorial dup 0> if dup 1- -rot * swap *factorial else drop then ;
+: factorial 1 swap *factorial ;
+20 factorial .
+: choose dup if over 1- over 1- choose rot * swap / else drop drop 1 then ;
+100 50 choose .
+`, "3628800 2432902008176640000 100891344545564193334812497256 ")
 }
 
 // Also from "Starting Forth" by Leo Brodie.
@@ -129,8 +131,7 @@ func TestChapter5LongerExample(t *testing.T) {
                     THEN
       LOOP 2DROP ;
    DOUBLED
-   bye`,
-`
+`, `
 YEAR  1   BALANCE 1060 
 YEAR  2   BALANCE 1124 
 YEAR  3   BALANCE 1191 
@@ -167,7 +168,6 @@ func TestChapter9LongerExample(t *testing.T) {
     ALOHA
     GOING
     ALOHA
-    bye
 `, `Hello Goodbye Hello Goodbye Hello Goodbye `)
 }
 
@@ -192,7 +192,8 @@ DECIMAL
   81 42 24 18 18 24 24 81  SHAPE equis
   AA AA FE FE 38 38 38 FE  SHAPE castle
   DECIMAL
-  man bye`, `
+  man
+`, `
    **   
    **   
   ****  
@@ -202,6 +203,44 @@ DECIMAL
   *  *  
   *  *  
 `)
+}
+
+
+// Partial explanation:
+// http://en.literateprograms.org/Eight_queens_puzzle_(Forth)
+// Uses cool bit-twiddling tricks.
+func TestEightQueens(t *testing.T) {
+  filer(t,
+`variable solutions
+variable nodes
+
+: bits ( n -- mask ) 1 swap lshift 1- ;
+: lowBit  ( mask -- bit ) dup negate and ;
+: lowBit- ( mask -- bits ) dup 1- and ;
+
+: next3 ( dl dr f files -- dl dr f dl' dr' f' )
+  invert >r
+  2 pick r@ and 2* 1+
+  2 pick r@ and 2/
+  2 pick r> and ;
+
+: try ( dl dr f -- )
+  dup if
+    1 nodes +!
+    dup 2over and and
+    begin ?dup while
+      dup >r lowBit next3 recurse r> lowBit-
+    repeat
+  else 1 solutions +! then
+  drop 2drop ;
+
+: queens ( n -- )
+  0 solutions ! 0 nodes !
+  -1 -1 rot bits try
+  solutions @ . ." solutions, " nodes @ . ." nodes" ;
+
+8 queens
+`, `92 solutions, 1965 nodes`)
 }
 
 // http://en.literateprograms.org/Fixed-point_arithmetic_(Forth)
@@ -233,7 +272,7 @@ decimal
     xinc +loop
     cr
   yinc +loop ;
-mandel bye
+mandel
 `,
 `                                                                                 
                                                                                  
@@ -334,7 +373,7 @@ func TestGameOfLife(t *testing.T) {
  : pentadecathalon s" **********" pat ;
  : clock s"  *|  **|**|  *" pat ;
 
-clear 0 glider show gen show bye
+clear 0 glider show gen show
 `, `
  *                                                              
   *                                                             
