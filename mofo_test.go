@@ -119,6 +119,53 @@ func TestRecursion(t *testing.T) {
 `, "3628800 2432902008176640000 100891344545564193334812497256 ")
 }
 
+/* A translation of:
+  void perm(int *a, int n, int i) {
+    if (i < n) {
+      swap(a, a+i), perm(a+1, n-1, 0), swap(a, a+i);
+      perm(a, n, i+1);
+    } else if (!n) {
+      // Print whole array.
+    }
+  }
+*/
+func TestPermutations(t *testing.T) {
+  filer(t, `
+: xchg dup @ >r over @ swap ! r> swap ! ;
+: axchg 2 pick over over + xchg ;
+: seq ( addr limit start -- ) 2dup = if 2drop drop else rot dup >r -rot dup >r 1+ rot 1+ -rot 2r> swap ! seq then ;
+: show dup if 1- swap dup @ 0 .r 1+ swap show else 2drop then ;
+0 value array 0 value size
+: perm-rec 2dup = if drop nip if else array size show cr then else axchg -rot over 1+ over 1- 0 perm-rec rot axchg 1+ perm-rec then ;
+ : perm ( u -- ) dup to size here to array allot array size 0 seq array size 0 perm-rec size negate allot ;
+4 perm
+`, `0123
+0132
+0213
+0231
+0321
+0312
+1023
+1032
+1203
+1230
+1320
+1302
+2103
+2130
+2013
+2031
+2301
+2310
+3120
+3102
+3210
+3201
+3021
+3012
+`)
+}
+
 // Also from "Starting Forth" by Leo Brodie.
 func TestChapter5LongerExample(t *testing.T) {
   filer(t,

@@ -422,7 +422,7 @@ int main(int argc, char **argv) {
 
   DICT("allot", {
     mpz_ptr z = POPZ;
-    uintptr_t n = mpz_get_ui(z);
+    intptr_t n = mpz_get_si(z);
     {
       // This hack prevents a crash if curdef is still equal to the definition
       // containing this ALLOC, because the ip pointer may be invalidated by a
