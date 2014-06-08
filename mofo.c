@@ -100,8 +100,8 @@ int main(int argc, char **argv) {
   stack_ptr ijstack = stack_new_mpz();
   stack_ptr ostack = stack_new_mpz();
   stack_ptr rstack = stack_new();
-  int state = 0;
-  char *word = 0, *cursor = 0;
+  int state = 0, postfix_pure = 0;
+  char *word = 0, *cursor = 0, *quote;
   int get_word() {
     if (!*cursor) return 0;
     while (*cursor == ' ') cursor++;  // Skip whitespace.
@@ -109,6 +109,10 @@ int main(int argc, char **argv) {
     while (*cursor && *cursor != ' ') cursor++;  // Read word.
     if (*cursor) *cursor++ = 0;
     return *word;
+  }
+  int get_arg() {
+    if (postfix_pure) return !!(word = quote);
+    return get_word();
   }
   void get_until(char x) {
     word = cursor;
@@ -185,7 +189,7 @@ int main(int argc, char **argv) {
 #define DICT_C( _word_,_fun_) add_dict(_word_,ANON(_fun_),0,1)
 #define DICT_I( _word_,_fun_) add_dict(_word_,ANON(_fun_),1,0)
 #define DICT_IC(_word_,_fun_) add_dict(_word_,ANON(_fun_),1,1)
-#define FIND_DEFN ({ if (!get_word()) ABORT("empty name"); \
+#define FIND_DEFN ({ if (!get_arg()) ABORT("empty name"); \
     defn_ptr defn = find_defn(word); \
     if (!defn) ABORT("name not found"); defn; })
 
@@ -201,6 +205,11 @@ int main(int argc, char **argv) {
   DICT_C("rclear", { stack_reset(rstack); });
   DICT_C("(jmp)", { ip += (intptr_t) *ip; });
   DICT_C("(jz)", { mpz_ptr z = POPZ; ip += mpz_sgn(z) ? 1 : (intptr_t) *ip ; });
+
+  DICT("postfix-pure", { postfix_pure = 1; });
+  DICT("postfix-impure", { postfix_pure = 0; });
+  DICT_I("`", { get_until('`'); quote = word; });
+  DICT_I("q.", { fputs(quote, stdout); });
 
   // More standard words.
   DICT("here", { mpz_set_ui(*stack_grow(dstack), here); });
@@ -252,12 +261,12 @@ int main(int argc, char **argv) {
   }
 
   DICT("char", {
-    if (!get_word()) ABORT("empty word");
+    if (!get_arg()) ABORT("empty word");
     mpz_set_ui(*stack_grow(dstack), decode_utf8(word));
   });
 
   DICT_IC("[char]", {
-    if (!get_word()) ABORT("empty word");
+    if (!get_arg()) ABORT("empty word");
     compile(run_literal_ui);
     compile((void *) decode_utf8(word));
   });
@@ -318,7 +327,7 @@ int main(int argc, char **argv) {
     ip = p + 1;
   }
   DICT(":", {
-    if (!get_word()) ABORT("empty name");
+    if (!get_arg()) ABORT("empty name");
     curdef_new(0, 0);
     add_entry(word);
     state = 1;
@@ -397,7 +406,7 @@ int main(int argc, char **argv) {
   }
 
   DICT("create", {
-    if (!get_word()) ABORT("empty name");
+    if (!get_arg()) ABORT("empty name");
     curdef_new(0, 0);
     add_entry(word);
     compile(codeword_create);
