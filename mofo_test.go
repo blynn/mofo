@@ -252,7 +252,6 @@ DECIMAL
 `)
 }
 
-
 // Partial explanation:
 // http://en.literateprograms.org/Eight_queens_puzzle_(Forth)
 // Uses cool bit-twiddling tricks.

@@ -11,7 +11,7 @@
 
 #define ANON(_body_) ({void _()_body_ _;})
 
-#define ABORT(_msg_) ({ puts(_msg_); stack_reset(dstack); cpu_run((void *) find_xt("quit")); return; })
+#define ABORT(_msg_) ({ puts(_msg_); stack_reset(dstack); cpu_run(find_xt("quit")); return; })
 
 #define POPZ ({ if (stack_empty(dstack)) ABORT("stack underflow"); stack_pop(dstack); })
 
@@ -33,11 +33,6 @@ defn_ptr defn_new(char immediate, char compile_only) {
   r->cell = 0;
   r->it = 0;
   return r;
-}
-
-void **defn_grow_n(defn_ptr defn, size_t n) {
-  defn->cell = realloc(defn->cell, (defn->n += n) * sizeof(void *));
-  return &defn->cell[defn->n - 1];
 }
 
 void **defn_grow(defn_ptr defn) {
@@ -203,22 +198,19 @@ int main(int argc, char **argv) {
     curdef->compile_only = 1;
   });
   DICT_C("2rdrop", { ijstack->i -= 2; });
+  DICT_C("rclear", { stack_reset(rstack); });
   DICT_C("(jmp)", { ip += (intptr_t) *ip; });
   DICT_C("(jz)", { mpz_ptr z = POPZ; ip += mpz_sgn(z) ? 1 : (intptr_t) *ip ; });
 
-  // More "standard" words.
+  // More standard words.
   DICT("here", { mpz_set_ui(*stack_grow(dstack), here); });
-
   DICT_C(">r", { stack_push_mpz(ijstack, POPZ); });
   DICT_C("r>", { stack_push_mpz(dstack, stack_pop(ijstack)); });
   DICT_C("r@", { stack_push_mpz(dstack, stack_peep(ijstack)); });
-  DICT_C("rclear", { stack_reset(rstack); });
   DICT_C("j", { stack_push_mpz(dstack, ijstack->p[ijstack->i - 3]); });
 
   void (*refill)();
   DICT("refill", { refill(); });
-
-  DICT("cr", { putchar('\n'); });
 
   void **base;
   int get_base() {
@@ -227,14 +219,12 @@ int main(int argc, char **argv) {
     return r;
   }
   DICT(".", {
-    mpz_ptr z = POPZ;
-    mpz_out_str(stdout, (uintptr_t) *base, z);
+    mpz_out_str(stdout, (uintptr_t) *base, POPZ);
     putchar(' ');
   });
 
   DICT(".r", {
-    mpz_ptr z = POPZ;
-    int n = mpz_get_si(z);
+    int n = mpz_get_si(POPZ);
     char fmt[8];
     // TODO: Number base.
     if (n > 0 && n <= 1024) sprintf(fmt, "%%%dZd", n); else strcpy(fmt, "%Zd");
@@ -276,20 +266,21 @@ int main(int argc, char **argv) {
     if (dstack->i < _n_) ABORT("stack underflow"); \
     void **p = dstack->p + dstack->i - 1; _fun_ })
   void swap(void **p, void **q) { void *tmp = *p; *p = *q, *q = tmp; }
+  void dup(void **p) { stack_push_mpz(dstack, *p); }
   DICT("drop", { POPZ; });
   DICT("dup", { stack_push_mpz(dstack, PEEPZ); });
   DICT_STACK( "swap", 2, { swap(p, p-1); });
   DICT_STACK("2swap", 4, { swap(p, p-2); swap(p-1, p-3); });
   DICT_STACK(  "nip", 2, { swap(p, p-1); dstack->i--; });
-  DICT_STACK( "over", 2, { mpz_set(*stack_grow(dstack), *(p-1)); });
-  DICT_STACK("2over", 4, { mpz_set(*stack_grow(dstack), *(p-3));
-                           mpz_set(*stack_grow(dstack), *(p-2)); });
+  DICT_STACK( "tuck", 2, { swap(p, p-1); dup(p-1); });
+  DICT_STACK( "over", 2, { dup(p-1); });
+  DICT_STACK("2over", 4, { dup(p-3); dup(p-2); });
   DICT_STACK(  "rot", 3, { swap(p, p-2); swap(p-1, p-2); });
   DICT_STACK( "-rot", 3, { swap(p-1, p-2); swap(p, p-2); });
   DICT("pick", {
     unsigned int n = mpz_get_ui(POPZ);
     if (dstack->i <= n) ABORT("stack underflow");
-    mpz_set(*stack_grow(dstack), dstack->p[dstack->i - 1  - n]);
+    dup(dstack->p + dstack->i - 1  - n);
   });
 
 #define DICT_MPZ_DIRECT(_op_, _mpz_fun_) DICT(_op_, { \
@@ -421,26 +412,21 @@ int main(int argc, char **argv) {
   });
 
   DICT("allot", {
-    mpz_ptr z = POPZ;
-    intptr_t n = mpz_get_si(z);
+    intptr_t n = mpz_get_si(POPZ);
     {
       // This hack prevents a crash if curdef is still equal to the definition
       // containing this ALLOC, because the ip pointer may be invalidated by a
       // realloc(). A similar problem exists with the comma operator.
       uint64_t hack = ip - curdef->cell;
       int use_hack = ip >= curdef->cell && hack < curdef->n;
-      defn_grow_n(curdef, n);
+      curdef->cell = realloc(curdef->cell, (curdef->n += n) * sizeof(void *));
       if (use_hack) ip = curdef->cell + hack;
     }
     here += n;
   });
 
   // TODO: Switch to mpz for sufficiently large integers.
-  DICT(",", {
-    mpz_ptr z = POPZ;
-    intptr_t n = mpz_get_si(z);
-    compile((void *) n);
-  });
+  DICT(",", { compile((void *) mpz_get_si(POPZ)); });
 
   DICT("@", {
     mpz_ptr z = PEEPZ;
@@ -654,6 +640,7 @@ int main(int argc, char **argv) {
 "  then then then then ; "
 "decimal ",
 ": type 0 do dup @ emit 1+ loop ;",
+": cr 10 emit ;",
 ": space 32 emit ;",
 ": spaces dup 0> if 0 do space loop then ;",
 "32 constant bl",
