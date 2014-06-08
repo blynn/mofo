@@ -5,6 +5,6 @@ CFLAGS := -O2 --std=gnu99 -Wall
 
 target: mofo
 
-mofo: mofo.c ; $(CC) $(CFLAGS) -o$@ mofo.c ~/pro/blt/blt.c -I ~/pro/blt -lreadline -lgmp
+mofo: mofo.c ; $(CC) $(CFLAGS) -o$@ mofo.c blt.c -lreadline -lgmp
 
 test: mofo ; go test mofo_test.go
