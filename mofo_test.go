@@ -166,6 +166,65 @@ func TestPermutations(t *testing.T) {
 `)
 }
 
+// Solves n-queens puzzle.
+// Exercises "postfix-pure" mode, mutually recursive functions (we use [`] so
+// one can be defined before the other).
+// Uses "q." to print last quoted string.
+func TestPostfixPure(t *testing.T) {
+  filer(t, `postfix-pure
+"n-queens" variable
+"?more" : dup n-queens @ < ;
+"sol-count" variable
+"sol" variable
+"getq" : sol @ + @ ;
+"setq" : swap sol @ + ! ;
+
+"print-cell" : ?more if 2dup = negate 35 * 46 + emit 1+ print-cell then ;
+"print-row" : ?more if dup getq 0 print-cell cr 2drop 1+ print-row then ;
+"print-sol" : 1 sol-count +! 0 print-row drop cr ;
+
+"check" : 2dup = if 2drop -1 exit then
+  over getq over getq - dup 0= if drop 2drop 0 exit then
+  >r 2dup - r@ = if 2drop r> drop 0 exit then
+  2dup - r> negate = if 2drop 0 exit then
+  1+ check ;
+
+"branch" : dup 0 check if 1+ swap execute else 2drop then ;
+"incr" : dup getq ?more if -rot 2dup branch rot 1+ over swap setq incr then ;
+"search" : ?more if dup 0 setq "search" ['] swap incr 2drop drop else drop print-sol then ; 
+"queens" : 0 sol-count ! dup n-queens ! here sol ! dup allot 0 search sol-count ? "solutions." q. negate allot ;
+6 queens`,
+`.Q....
+...Q..
+.....Q
+Q.....
+..Q...
+....Q.
+
+..Q...
+.....Q
+.Q....
+....Q.
+Q.....
+...Q..
+
+...Q..
+Q.....
+....Q.
+.Q....
+.....Q
+..Q...
+
+....Q.
+..Q...
+Q.....
+.....Q
+...Q..
+.Q....
+
+4 solutions.`)
+}
+
 // Also from "Starting Forth" by Leo Brodie.
 func TestChapter5LongerExample(t *testing.T) {
   filer(t,
@@ -291,6 +350,41 @@ variable nodes
 
 // http://en.literateprograms.org/Fixed-point_arithmetic_(Forth)
 func TestMandelbrot(t *testing.T) {
+  filer(t,
+  // monoForth's RSHIFT is an arithmetic right shift, unlike the standard.
+`
+: >>a rshift ; hex : f* * e >>a ; : sq over dup f* ; : x 4666 dup negate do
+4000 dup 2* negate do i j 1e begin 1- ?dup while -rot sq sq 2dup + 10000 <
+while - i + -rot f* 2* j + rot repeat 2drop drop bl else 2a then emit 2drop 268
++loop cr 5de +loop ; x
+`,
+`                                                                                
+                                                                                
+                                                                                
+                                               * ***                            
+                                                *****                           
+                                            ** *******  **                      
+                                      ********************* ***                 
+                                    * ************************                  
+                                    ***************************  *              
+                       *  ** *    ******************************                
+                      *********** ******************************                
+                    ********************************************                
+      *   *   ***********************************************                   
+                    ********************************************                
+                      *********** ******************************                
+                       *  ** *    ******************************                
+                          *         ***************************  *              
+                                    * ************************                  
+                                      ********************* ***                 
+                                            ** *******  **                      
+                                                *****                           
+                                               * ***                            
+                                                                                
+                                                                                
+`)
+  // The friendlier version uses different constants for xinc and yinc,
+  // (614 and 1501 instead of 616 and 1502) so we get a different picture.
   filer(t,
 `hex
  4000 constant 1fixed

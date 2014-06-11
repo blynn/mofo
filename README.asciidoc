@@ -90,21 +90,20 @@ indicate that "foo" is to be taken
 http://en.wikipedia.org/wiki/Literal_(computer_programming)[literally, so to
 speak], rather than looked up and executed:
 
- ` foo` : nip tuck ;
-
-Here, I've chosen the backquote for this purpose, as this character seems to be
-unused by typical Forth programs.
+ "foo" : nip tuck ;
 
 This suggests a possible motive for tolerating prefix notation. Without it, we
 would have to introduce quotation. And since word definitions are frequent,
 quotation makes code less convenient to type.
 
-However, we can easily reduce the inconvenience by, for example, defining
-": foo:" to mean: quote "foo", then execute the usual meaning of ":".
-Moreover, to make up for the one extra colon, we gain simplicity and
-convenience in other ways. By factoring out quotation, we no longer need words
-like dot-quote or s-quote or bracket-char. Even parenthesized comments can
-simply be unused quoted strings.
+Or maybe there were concerns about creating definitions for words containing
+whitespace. Forth's simplistic lexer could not execute such words in the usual
+straightforward manner.
+
+Moreover, we gain simplicity and convenience in other ways. By factoring out
+quotation, we no longer need read-ahead words like dot-quote or s-quote.
+Even parenthesized comments can simply be unused quoted strings. Most of
+all, everything would be strictly postfix.
 
 Perhaps better still, we could follow colorForth's lead and introduce a colour
 to mean the current string is quoted, though some convention would have to be
@@ -114,16 +113,24 @@ devised for coloured spaces.
 
 Executing the "postfix-pure" word in monoForth makes all words postfix.
 Words that are usually prefix will use the last-quoted string instead.
-Strings are quoted with backquote characters, but this being Forth, a space
-must be present between the opening backquote and the start of the string. I've
-made no attempt to make definitions easier to type. For example:
+Strings are quoted with backquote characters.
+
+My initial implementation was concise, but used backquotes, and required a
+space between the opening backquote and the start of the string. I later
+extended the lexer so that in postfix pure mode, the regular quote has a
+different meaning: characters between quotes are handled specially, and there
+should be no space following the opening quote (unless the string truly begins
+with a space). This extra code probably goes against the spirit of Forth, but
+makes life easier.
+
+For example:
 
   postfix-pure
-  ` foo` : nip tuck ;
+  "foo" : nip tuck ;
   3671 emit 12354 emit  \ Prints "๗あ"
-  ` 叶` char . ` 葉` char .  \ Prints "21494 33865 "
-  0 ` x` value
-  1 ` x` to
+  "叶" char . "葉" char .  \ Prints "21494 33865 "
+  0 "x" value
+  1 "x" to
 
 Normal Forth syntax can be restored by executing "postfix-impure".
 
@@ -131,7 +138,7 @@ While monoForth has refrained from colorForth's bold method of differentiating
 types of words, we get a similar experience by viewing postfix-pure source
 through an appropriate filter:
 
-  $ sed 's/` \([^`]*\)`/\c[[1m\1\c[[0m/g' < source.f
+  $ sed 's/"\([^"]*\)"/\c[[1m\1\c[[0m/g' < source.f
 
 Behind the scenes, monoForth maintains an extra pointer that records where the
 quoted string begins in the input buffer. We could make it accessible to the

@@ -102,24 +102,23 @@ int main(int argc, char **argv) {
   stack_ptr rstack = stack_new();
   int state = 0, postfix_pure = 0;
   char *word = 0, *cursor = 0, *quote;
-  int get_word() {
-    if (!*cursor) return 0;
-    while (*cursor == ' ') cursor++;  // Skip whitespace.
-    word = cursor;
-    while (*cursor && *cursor != ' ') cursor++;  // Read word.
-    if (*cursor) *cursor++ = 0;
-    return *word;
-  }
-  int get_arg() {
-    if (postfix_pure) return !!(word = quote);
-    return get_word();
-  }
-  void get_until(char x) {
-    word = cursor;
+  char *cursor_past(char x) {
+    char *r = cursor;
     while (*cursor && *cursor != x) cursor++;
     if (*cursor) *cursor++ = 0;  // EOL also terminates the search.
+    return r;
   }
-
+  int get_word() {
+    while (*cursor == ' ') cursor++;  // Skip whitespace.
+    if (postfix_pure && *cursor == '"') {  // Read quoted word.
+      ++cursor;
+      quote = cursor_past('"');
+      return get_word();  // Keep parsing.
+    }
+    return *(word = cursor_past(' '));
+  }
+  int get_arg() { return postfix_pure ? !!(word = quote) : get_word(); }
+  void get_until(char x) { word = cursor_past(x); }
   void get_until_quote() { get_until('"'); }
 
   void **ip = 0;
@@ -185,6 +184,8 @@ int main(int argc, char **argv) {
     add_entry(word);
   }
 
+  void *run_print[] = {ANON({ fputs((const char *) *ip++, stdout); })};
+
 #define DICT(   _word_,_fun_) add_dict(_word_,ANON(_fun_),0,0)
 #define DICT_C( _word_,_fun_) add_dict(_word_,ANON(_fun_),0,1)
 #define DICT_I( _word_,_fun_) add_dict(_word_,ANON(_fun_),1,0)
@@ -208,8 +209,10 @@ int main(int argc, char **argv) {
 
   DICT("postfix-pure", { postfix_pure = 1; });
   DICT("postfix-impure", { postfix_pure = 0; });
-  DICT_I("`", { get_until('`'); quote = word; });
-  DICT_I("q.", { fputs(quote, stdout); });
+  DICT_IC("q.", {
+    compile(run_print);
+    compile(strdup(quote));
+  });
 
   // More standard words.
   DICT("here", { mpz_set_ui(*stack_grow(dstack), here); });
@@ -312,6 +315,7 @@ int main(int argc, char **argv) {
   DICT_MPZ("min", { mpz_set(z, mpz_cmp(z, x) < 0 ? z : x); });
   DICT_MPZ("max", { mpz_set(z, mpz_cmp(z, x) > 0 ? z : x); });
   DICT_MPZ("lshift", { mpz_mul_2exp(z, z, mpz_get_ui(x)); });
+  // Arithmetic right shift, unlike standard Forth.
   DICT_MPZ("rshift", { mpz_fdiv_q_2exp(z, z, mpz_get_ui(x)); });
 
   DICT("invert", { mpz_ptr z = PEEPZ; mpz_com(z, z); });
@@ -456,8 +460,6 @@ int main(int argc, char **argv) {
 
   DICT_I("(", { get_until(')'); });
   DICT_I("\\", { get_until(0); });
-
-  void *run_print[] = {ANON({ fputs((const char *) *ip++, stdout); })};
 
   DICT_IC(".\"", {
     get_until_quote();
