@@ -61,21 +61,14 @@ If Forth likes postfix notation,
 By adding a bit of quotation?
 ________________________________
 
-Despite Forth's famously stubborn adherence to postfix notation, sometimes
-is in fact infix or prefix. For example, the ":" word is prefix: it
-creates a dictionary entry using the _next_ word before switching to compile
-mode. Similarly, the word "TO" is infix: "1 TO ONE" assigns the number 1 to
-the (previously declared) value named "ONE".
+Despite Forth's famously stubborn adherence to postfix notation, some words
+are in fact infix or prefix. For example, the word ":" is prefix: it creates a
+dictionary entry using the _next_ word before switching to compile mode.
+Similarly, the word "TO" is infix: "1 TO ONE" assigns the number 1 to the
+(previously declared) value named "ONE".
 
 Why is this? Why would a language designer decide postfix is best, but then
-add prefix notation anyway?
-
-Perhaps it was felt using prefix notation for unary operations is acceptable in
-moderation. After all, the most common notation for negative numbers looks like
-"-123". The only prefix words of Forth are unary operations, and the infix
-words are built upon them. But whatever the reason, Forth has a confusing
-inconsistent mix of prefix and postfix unary operations.
-
+add prefix notation anyway? Perhaps we can answer this question by asking:
 What would Forth look like if we insisted on postfix? Instead of:
 
  : foo nip tuck ;  \ a b c -- c a c
@@ -84,7 +77,7 @@ we'd write:
 
  foo : nip tuck ;
 
-But now we run into trouble: when "foo" is first encountered, Forth complains
+Now we see the trouble: when "foo" is first encountered, Forth complains
 because it is undefined. The only recourse is quotation. We must somehow
 indicate that "foo" is to be taken
 http://en.wikipedia.org/wiki/Literal_(computer_programming)[literally, so to
@@ -92,22 +85,21 @@ speak], rather than looked up and executed:
 
  "foo" : nip tuck ;
 
-This suggests a possible motive for tolerating prefix notation. Without it, we
-would have to introduce quotation. And since word definitions are frequent,
-quotation makes code less convenient to type.
+This suggests a possible motive for tolerating prefix notation. Without prefix,
+we need quotation. And since word definitions are frequent, quotation makes
+code less convenient to type.
 
 Or maybe there were concerns about creating definitions for words containing
 whitespace. Forth's simplistic lexer could not execute such words in the usual
 straightforward manner.
 
-Moreover, we gain simplicity and convenience in other ways. By factoring out
+However, quotation's benefits may outweigh its costs. By factoring out
 quotation, we no longer need read-ahead words like dot-quote or s-quote.
-Even parenthesized comments can simply be unused quoted strings. Most of
-all, everything would be strictly postfix.
+Even parenthesized comments can simply be unused quoted strings. Most of all,
+everything would be strictly postfix.
 
-Perhaps better still, we could follow colorForth's lead and introduce a colour
-to mean the current string is quoted, though some convention would have to be
-devised for coloured spaces.
+We could even follow colorForth's lead and use colour to denote a quoted
+string, though some convention would have to be devised for coloured spaces.
 
 == Postfix-pure monoForth ==
 
