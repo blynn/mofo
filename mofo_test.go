@@ -166,6 +166,53 @@ func TestPermutations(t *testing.T) {
 `)
 }
 
+// A test inspired by basic Lisp, and also John Hughes: "Why Functional
+// Programming Matters".
+func TestLispAndFunctionalProgramming(t *testing.T) {
+  filer(t, `
+postfix-pure
+"cons" : here >r swap , , r> ;
+"car" : @ ;
+"rplaca" : swap ! ;
+"cdr" : 1+ @ ;
+"null" : 0= ;
+"mapcar" : swap >r dup null if drop r> drop else dup dup car r@ execute rplaca cdr r> swap mapcar then ;
+
+"show" : dup null if drop else dup car . cdr show then ;
+
+"reduce" : dup null if drop nip else >r over swap r@ cdr reduce r> car swap rot execute then ;
+
+"sum" : "+" ['] 0 rot reduce ;
+"prod" : "*" ['] 1 rot reduce ;
+"append" : "cons" ['] -rot swap reduce ;
+
+\ Uses a global variable to do "anonymous" function composition.
+"fun" variable
+"funandcons" : swap fun @ execute swap cons ;
+"map1" : swap fun ! "funandcons" ['] 0 rot reduce ;
+
+\ True anonymous function; specific to current implementation of \ monoForth.
+"map" : here >r (colon-vm) , "swap" ['] (vm) , swap (vm) , "swap" ['] (vm) , "cons" ['] (vm) , "exit" ['] (vm) , r> 0 rot reduce ;
+
+0 "list123" value
+0 "list456" value
+1 2 3 0 cons cons cons "list123" to
+4 5 6 0 cons cons cons "list456" to
+
+list123 dup car . cdr show cr
+list123 sum .  list456 prod .  cr
+list123 list456 append "1+" ' over mapcar show cr
+"2*" ' list456 map1 show cr
+"square" : dup * ;
+"square" ' list123 map1 show cr
+`, `1 2 3 
+6 120 
+2 3 4 5 6 7 
+10 12 14 
+1 4 9 
+`)
+}
+
 // Solves n-queens puzzle.
 // Exercises "postfix-pure" mode, mutually recursive functions (we use [`] so
 // one can be defined before the other).

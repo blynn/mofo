@@ -14,8 +14,8 @@
 #define ABORT(_msg_) ({ puts(_msg_); stack_reset(dstack); cpu_run(find_xt("quit")); return; })
 
 #define POPZ ({ if (stack_empty(dstack)) ABORT("stack underflow"); stack_pop(dstack); })
-
 #define PEEPZ ({ if (stack_empty(dstack)) ABORT("stack underflow"); stack_peep(dstack); })
+#define GROWZ (*stack_grow(dstack))
 
 struct defn_s {
   char immediate, compile_only;
@@ -125,7 +125,7 @@ int main(int argc, char **argv) {
 
   void *run_literal[] = {ANON({ stack_push_mpz(dstack, *ip++); })};
 
-  void *run_literal_ui[] = {ANON({ mpz_set_ui(*stack_grow(dstack), (uintptr_t) *ip++); })};
+  void *run_literal_ui[] = {ANON({ mpz_set_ui(GROWZ, (uintptr_t) *ip++); })};
 
   void cpu_run(void *p) { (*((void (**)(void *)) p))(p); }
 
@@ -214,8 +214,18 @@ int main(int argc, char **argv) {
     compile(strdup(quote));
   });
 
+  void codeword_colon(void **p) {
+    stack_push(rstack, ip);
+    ip = p + 1;
+  }
+  DICT("(colon-vm)", { mpz_set_ui(GROWZ, (intptr_t) codeword_colon); });
+  DICT("(vm)", {
+    mpz_ptr z = PEEPZ;
+    mpz_set_ui(z, (intptr_t) vmem_fetch(z));
+  });
+
   // More standard words.
-  DICT("here", { mpz_set_ui(*stack_grow(dstack), here); });
+  DICT("here", { mpz_set_ui(GROWZ, here); });
   DICT_C(">r", { stack_push_mpz(ijstack, POPZ); });
   DICT_C("r>", { stack_push_mpz(dstack, stack_pop(ijstack)); });
   DICT_C("r@", { stack_push_mpz(dstack, stack_peep(ijstack)); });
@@ -265,7 +275,7 @@ int main(int argc, char **argv) {
 
   DICT("char", {
     if (!get_arg()) ABORT("empty word");
-    mpz_set_ui(*stack_grow(dstack), decode_utf8(word));
+    mpz_set_ui(GROWZ, decode_utf8(word));
   });
 
   DICT_IC("[char]", {
@@ -324,12 +334,8 @@ int main(int argc, char **argv) {
 
   DICT_IC("[", { state = 0; });
   DICT("]", { state = 1; });
-  DICT("state", { stack_grow(dstack); mpz_set_ui(PEEPZ, state); });
+  DICT("state", { mpz_set_ui(GROWZ, state); });
 
-  void codeword_colon(void **p) {
-    stack_push(rstack, ip);
-    ip = p + 1;
-  }
   DICT(":", {
     if (!get_arg()) ABORT("empty name");
     curdef_new(0, 0);
@@ -390,21 +396,17 @@ int main(int argc, char **argv) {
     }
   });
 
-  DICT("'", { mpz_set_ui(*stack_grow(dstack), FIND_DEFN->vloc); });
-
+  DICT("'", { mpz_set_ui(GROWZ, FIND_DEFN->vloc); });
   DICT_IC("[']", {
     compile(run_literal_ui);
     compile((void *) FIND_DEFN->vloc);
   });
-
   DICT("execute", { cpu_run((void *) vmem_fetch(POPZ)); });
 
-  void codeword_create(void **p) {
-    mpz_set_ui(*stack_grow(dstack), (uintptr_t) p[1]);
-  }
+  void codeword_create(void **p) { mpz_set_ui(GROWZ, (uintptr_t) p[1]); }
 
   void codeword_does(void **p) {
-    mpz_set_ui(*stack_grow(dstack), (uintptr_t) p[1]);
+    mpz_set_ui(GROWZ, (uintptr_t) p[1]);
     stack_push(rstack, ip);
     ip = p[2];
   }
@@ -524,7 +526,7 @@ int main(int argc, char **argv) {
         cpu_run(defn->cell);
       }
     } else {
-      if (mpz_set_str(*stack_grow(dstack), word, get_base())) {
+      if (mpz_set_str(GROWZ, word, get_base())) {
         printf("'%s':", word); ABORT("bad word");
       }
       if (state == 1) {
@@ -544,7 +546,7 @@ int main(int argc, char **argv) {
   curdef_new(0, 0);
   add_entry("interpret");
   compile(codeword_colon);
-  compile((void*[]){ANON({ mpz_set_si(*stack_grow(dstack), -!!get_word()); })});
+  compile((void*[]){ANON({ mpz_set_si(GROWZ, -!!get_word()); })});
   compile(find_xt("(jz)"));
   compile((void *) 4);
   compile((void*[]){interpret_word});
@@ -567,7 +569,7 @@ int main(int argc, char **argv) {
   void refill_terminal() {
     free(tib);
     cursor = tib = liner();
-    mpz_set_si(*stack_grow(dstack), -!!tib);
+    mpz_set_si(GROWZ, -!!tib);
   }
 
   void refill_files() {
@@ -576,7 +578,7 @@ int main(int argc, char **argv) {
     for (;;) {
       if (i == argc) {
         refill = refill_terminal;
-        mpz_set_si(*stack_grow(dstack), 0);
+        mpz_set_si(GROWZ, 0);
         return;
       }
       if (!fp) {
@@ -596,7 +598,7 @@ int main(int argc, char **argv) {
     char *c = tib + strlen(tib) - 1;
     if (*c == '\n') *c = 0;
     cursor = tib;
-    mpz_set_si(*stack_grow(dstack), -1);
+    mpz_set_si(GROWZ, -1);
   }
 
   // Load presets.
@@ -677,7 +679,7 @@ int main(int argc, char **argv) {
     }
     free(tib);
     cursor = tib = strdup(*p++);
-    mpz_set_si(*stack_grow(dstack), -1);
+    mpz_set_si(GROWZ, -1);
   }
   refill = refill_presets;
 
