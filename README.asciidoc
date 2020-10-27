@@ -9,7 +9,7 @@ implementations:
  * EMIT, CHAR, and [CHAR] speak UTF-8 instead of ASCII
 
 I originally chose the name "monochromeForth" to pay homage to
-http://www.colorforth.com/[colorForth].
+https://colorforth.github.io/[colorForth].
 Later, I preferred "monoForth" because it's less of a mouthful, and "mono" is
 apt for various reasons:
 
@@ -80,8 +80,8 @@ we'd write:
 Now we see the trouble: when "foo" is first encountered, Forth complains
 because it is undefined. The only recourse is quotation. We must somehow
 indicate that "foo" is to be taken
-http://en.wikipedia.org/wiki/Literal_(computer_programming)[literally, so to
-speak], rather than looked up and executed:
+http://en.wikipedia.org/wiki/Literal_(computer_programming)[literally]
+rather than looked up and executed:
 
  "foo" : nip tuck ;
 
@@ -105,7 +105,6 @@ string, though some convention would have to be devised for coloured spaces.
 
 Executing the "postfix-pure" word in monoForth makes all words postfix.
 Words that are usually prefix will use the last-quoted string instead.
-Strings are quoted with backquote characters.
 
 My initial implementation was concise, but used backquotes, and required a
 space between the opening backquote and the start of the string. I later
